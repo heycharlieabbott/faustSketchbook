@@ -14,4 +14,12 @@ fi
 base=${input%.dsp}
 output="${base}.jsfx"
 
-exec faust -lang jsfx "${input}" -o "${output}"
+faust -lang jsfx "${input}" -o "${output}"
+
+if ! command -v pbcopy >/dev/null 2>&1; then
+  echo "Error: pbcopy is required to copy output to clipboard." >&2
+  exit 1
+fi
+
+pbcopy < "${output}"
+echo "Compiled ${output} and copied contents to clipboard."
