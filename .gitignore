@@ -1,0 +1,7 @@
+# macOS
+.DS_Store
+
+# CMake/JUCE build output for basicFMPolysynth
+basicFMPolysynth/build/
+basicFMPolysynth/.cmake/
+basicFMPolysynth/CMakeUserPresets.json
