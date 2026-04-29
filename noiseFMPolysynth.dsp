@@ -11,7 +11,7 @@ freq = hslider("v:Osc/freq [unit:Hz] [midi:keyon]", 440, 20, 20000, 0.1) : si.po
 att = max(0.005, hslider("v:A/attack [unit:s]", 0.02, 0.001, 2, 0.001));
 dec = max(0.005, hslider("v:A/decay [unit:s]", 0.1, 0.001, 2, 0.001));
 sus = hslider("v:A/sustain", 0.7, 0, 1, 0.01);
-rel = max(0.03, hslider("v:A/release [unit:s]", 0.35, 0.03, 10, 0.01));
+rel = max(0.03, hslider("v:A/release [unit:s]", 0.09, 0.03, 10, 0.01));
 
 noiseVol = hslider("v:B/noiseVol", 0.007, 0, 5, 0.1);
 noiseFreq = hslider("v:B/noiseFreq", 1, 0, 100, 0.1);

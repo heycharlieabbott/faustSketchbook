@@ -58,7 +58,7 @@ desc: signals.lib/version "1.6.0"
 
 slider1:fHslider7=0.02<0.001,2,0.001>hslider_attack1 
 slider2:fHslider8=0.1<0.001,2,0.001>hslider_decay1 
-slider3:fHslider6=0.35<0.03,10,0.01>hslider_release1 
+slider3:fHslider6=0.09<0.03,10,0.01>hslider_release1 
 slider4:fHslider9=0.7<0,1,0.01>hslider_sustain1 
 slider5:fHslider14=1<0,300,1>hslider_mod1 
 slider6:fHslider15=1<0,300,1>hslider_modMix1 
@@ -93,7 +93,7 @@ fHslider2 = 0;
 fHslider3 = 0.5; 
 fHslider4 = 1; 
 fHslider5 = 0.25; 
-fHslider6 = 0.35; 
+fHslider6 = 0.09; 
 fHslider7 = 0.02; 
 fHslider8 = 0.1; 
 fHslider9 = 0.7; 

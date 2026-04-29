@@ -16,10 +16,9 @@ output="${base}.jsfx"
 
 faust -lang jsfx "${input}" -o "${output}"
 
-if ! command -v pbcopy >/dev/null 2>&1; then
-  echo "Error: pbcopy is required to copy output to clipboard." >&2
-  exit 1
-fi
+dest_dir="${HOME}/Library/Application Support/REAPER/Effects"
+dest_file="${dest_dir}/$(basename "${output}")"
 
-pbcopy < "${output}"
-echo "Compiled ${output} and copied contents to clipboard."
+mkdir -p "${dest_dir}"
+cp "${output}" "${dest_file}"
+echo "Compiled ${output} and copied to ${dest_file}."
