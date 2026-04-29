@@ -19,11 +19,7 @@ noiseFreq = hslider("v:B/noiseFreq", 1, 0, 100, 0.1);
 mod = hslider("v:B/mod", 1., 0, 300., 1.);
 modVol = hslider("v:B/modVol", 1., 0., 300., 1.);
 modMix = hslider("v:B/modMix", 1., 0., 300., 1.);
-
-modTri = hslider("v:B/modTri", 1., 0., 10., .001);
-modTriCol = hslider("v:B/modTriCol", 0., 0., 1., .001);
 modOffset = hslider("v:B/modOffset", 0., 0., 100., .001);
-
 
 modDelaySig = hslider("v:C/modDelaySig", 1., 0., 100., .001);
 modDelayVol = hslider("v:C/modDelayVol", 0.5, 0., 2., .001);
@@ -32,16 +28,12 @@ modDelayFb = hslider("v:C/modDelayFb", 0., 0., 0.9, .001);
 minClip = hslider("v:D/minClip", -1., -1., 1., 0.001);
 maxClip = hslider("v:D/maxClip", 1., -1., 1., 0.001);
 
-
-
 env = en.adsre(att, dec, sus, rel, gate);
-
 modOsc = os.osc(mod) * modVol * noiseVol;
-
 noiseOsc = no.lfnoise(freq * noiseFreq);
 
-oscLeft = os.osc(freq + modOsc * noiseOsc) * env * gain2;
-oscRight = os.osc(freq + modOffset + modOsc * noiseOsc) * env * gain2;
+oscLeft = os.polyblep_saw(freq + modOsc * noiseOsc) * env * gain2;
+oscRight = os.polyblep_square(freq + modOffset + modOsc * noiseOsc) * env * gain2;
 
 mixSignal = os.osc(modMix);
 
@@ -50,13 +42,12 @@ delayTimeSignal = os.osc(modDelaySig) * modDelayVol;
 intLeft = si.interpolate(mixSignal, oscLeft, oscRight);
 intRight = si.interpolate(mixSignal, oscRight, oscLeft);
 
-intDelLeft = intLeft : ef.echo(0.5, delayTimeSignal, modDelayFb);
-intDelRight = intRight: ef.echo(0.5, delayTimeSignal, modDelayFb);
+intDelLeft = intLeft : ef.echo(1, delayTimeSignal * 0.75, modDelayFb);
+intDelRight = intRight: ef.echo(1, delayTimeSignal, modDelayFb);
 
 stereo = intDelLeft, intDelRight;
 
-a = os.CZsawP(os.lf_sawpos(os.osc(modTri)), modTriCol);
-output = stereo : par(i, 2, _ * a) : par(i, 2, clamp(minClip, maxClip));
+output = stereo : par(i, 2, clamp(minClip, maxClip));
 
 
 process = output;
