@@ -5,6 +5,8 @@ desc: Effect mydsp
 desc: basics.lib/name "Faust Basic Element Library"
 desc: basics.lib/version "1.22.0"
 desc: compile_options "-lang jsfx -inpl -fpga-mem-th 4 -ct 1 -es 1 -mcd 16 -mdd 1024 -mdy 33 -single -ftz 0"
+desc: delays.lib/name "Faust Delay Library"
+desc: delays.lib/version "1.2.0"
 desc: envelopes.lib/adsre:author "Julius O. Smith III"
 desc: envelopes.lib/adsre:licence "STK-4.3"
 desc: envelopes.lib/author "GRAME"
@@ -35,10 +37,17 @@ desc: maths.lib/copyright "GRAME"
 desc: maths.lib/license "LGPL with exception"
 desc: maths.lib/name "Faust Math Library"
 desc: maths.lib/version "2.9.0"
+desc: misceffects.lib/echo:author "Romain Michon"
+desc: misceffects.lib/name "Misc Effects Library"
+desc: misceffects.lib/version "2.5.2"
 desc: name "noiseFMPolysynth"
 desc: noises.lib/name "Faust Noise Generator Library"
 desc: noises.lib/version "1.5.0"
 desc: options "[midi:on][nvoices:10]"
+desc: oscillators.lib/CZsawP:author "Bart Brouns"
+desc: oscillators.lib/CZsawP:licence "STK-4.3"
+desc: oscillators.lib/lf_sawpos:author "Bart Brouns, revised by Stéphane Letz"
+desc: oscillators.lib/lf_sawpos:licence "STK-4.3"
 desc: oscillators.lib/name "Faust Oscillator Library"
 desc: oscillators.lib/version "1.7.0"
 desc: platform.lib/name "Generic Platform Library"
@@ -47,27 +56,47 @@ desc: signals.lib/name "Faust Routing Library"
 desc: signals.lib/version "1.6.0"
 
 
-slider1:fHslider2=0.02<0.001,2,0.001>hslider_attack1 
-slider2:fHslider3=0.1<0.001,2,0.001>hslider_decay1 
-slider3:fHslider1=0.35<0.03,10,0.01>hslider_release1 
-slider4:fHslider4=0.7<0,1,0.01>hslider_sustain1 
-slider5:fHslider9=1<0,300,1>hslider_mod1 
-slider6:fHslider6=1<0,300,1>hslider_modVol1 
-slider7:fHslider8=1<0,100,0.1>hslider_noiseFreq1 
-slider8:fHslider7=0.007<0,5,0.1>hslider_noiseVol1 
+slider1:fHslider7=0.02<0.001,2,0.001>hslider_attack1 
+slider2:fHslider8=0.1<0.001,2,0.001>hslider_decay1 
+slider3:fHslider6=0.35<0.03,10,0.01>hslider_release1 
+slider4:fHslider9=0.7<0,1,0.01>hslider_sustain1 
+slider5:fHslider14=1<0,300,1>hslider_mod1 
+slider6:fHslider15=1<0,300,1>hslider_modMix1 
+slider7:fHslider16=0<0,100,0.001>hslider_modOffset1 
+slider8:fHslider17=1<0,10,0.001>hslider_modTri1 
+slider9:fHslider18=0<0,1,0.001>hslider_modTriCol1 
+slider10:fHslider11=1<0,300,1>hslider_modVol1 
+slider11:fHslider13=1<0,100,0.1>hslider_noiseFreq1 
+slider12:fHslider12=0.007<0,5,0.1>hslider_noiseVol1 
+slider13:fHslider2=0<0,0.9,0.001>hslider_modDelayFb1 
+slider14:fHslider4=1<0,100,0.001>hslider_modDelaySig1 
+slider15:fHslider3=0.5<0,2,0.001>hslider_modDelayVol1 
+slider16:fHslider0=1<-1,1,0.001>hslider_maxClip1 
+slider17:fHslider1=-1<-1,1,0.001>hslider_minClip1 
+slider18:fHslider5=0.25<0,1,0.01>hslider_gain21 
 
 out_pin:output0
 out_pin:output1
 
 @init
-fHslider1 = 0.35; 
-fHslider2 = 0.02; 
-fHslider3 = 0.1; 
-fHslider4 = 0.7; 
-fHslider6 = 1; 
-fHslider7 = 0.007; 
-fHslider8 = 1; 
-fHslider9 = 1; 
+fHslider0 = 1; 
+fHslider1 = -1; 
+fHslider11 = 1; 
+fHslider12 = 0.007; 
+fHslider13 = 1; 
+fHslider14 = 1; 
+fHslider15 = 1; 
+fHslider16 = 0; 
+fHslider17 = 1; 
+fHslider18 = 0; 
+fHslider2 = 0; 
+fHslider3 = 0.5; 
+fHslider4 = 1; 
+fHslider5 = 0.25; 
+fHslider6 = 0.35; 
+fHslider7 = 0.02; 
+fHslider8 = 0.1; 
+fHslider9 = 0.7; 
 
 // GLOBAL Functions 
 
@@ -188,122 +217,144 @@ function get_dsp(index) (
 // DSP struct memory layout 
 dsp.memory = MEMORY.alloc_memory(0);
 // Two identifiers to know which noteoff goes to which voice 
-dsp.size = 137;
+dsp.size = 262316;
 dsp.fHslider0 = 0;
-dsp.fButton0 = 1;
-dsp.IOTA0 = 2;
-dsp.fVec0 = 3;
-dsp.iVec1 = 67;
-dsp.fHslider1 = 69;
-dsp.iVec2 = 70;
-dsp.iRec1 = 72;
-dsp.fSampleRate = 74;
-dsp.fConst0 = 75;
-dsp.fHslider2 = 76;
-dsp.fHslider3 = 77;
-dsp.fConst1 = 78;
-dsp.fHslider4 = 79;
-dsp.fRec0 = 80;
-dsp.fHslider5 = 82;
-dsp.fRec4 = 83;
-dsp.fHslider6 = 85;
-dsp.fHslider7 = 86;
-dsp.fConst2 = 87;
-dsp.fHslider8 = 88;
-dsp.fConst3 = 89;
-dsp.fRec11 = 90;
-dsp.fRec12 = 92;
-dsp.iRec13 = 94;
-dsp.fRec10 = 96;
-dsp.fRec9 = 98;
-dsp.fRec8 = 100;
-dsp.fRec7 = 102;
-dsp.fRec6 = 104;
-dsp.fRec5 = 106;
-dsp.fHslider9 = 108;
-dsp.fRec14 = 109;
-dsp.fRec3 = 111;
-dsp.iVec3 = 113;
-dsp.iRec2 = 115;
-dsp.fSlow0 = 117;
-dsp.fSlow1 = 118;
-dsp.iSlow2 = 119;
-dsp.fSlow3 = 120;
-dsp.fSlow4 = 121;
-dsp.iSlow5 = 122;
-dsp.fSlow6 = 123;
-dsp.fSlow7 = 124;
-dsp.fSlow8 = 125;
-dsp.fSlow9 = 126;
-dsp.iSlow10 = 127;
-dsp.fSlow11 = 128;
-dsp.fSlow12 = 129;
-dsp.fSlow13 = 130;
-dsp.fSlow14 = 131;
-dsp.fSlow15 = 132;
-dsp.key_id = 133;
-dsp.gate = 134;
-dsp.output0 = 135; 
-dsp.output1 = 136; 
+dsp.fHslider1 = 1;
+dsp.fHslider2 = 2;
+dsp.IOTA0 = 3;
+dsp.fSampleRate = 4;
+dsp.fConst0 = 5;
+dsp.fConst1 = 6;
+dsp.fHslider3 = 7;
+dsp.iVec1 = 8;
+dsp.fConst2 = 10;
+dsp.fHslider4 = 11;
+dsp.fRec2 = 12;
+dsp.fHslider5 = 14;
+dsp.fButton0 = 15;
+dsp.fVec2 = 16;
+dsp.iVec3 = 80;
+dsp.fHslider6 = 82;
+dsp.iRec4 = 83;
+dsp.fHslider7 = 85;
+dsp.fHslider8 = 86;
+dsp.fHslider9 = 87;
+dsp.fRec3 = 88;
+dsp.fHslider10 = 90;
+dsp.fRec6 = 91;
+dsp.fHslider11 = 93;
+dsp.fHslider12 = 94;
+dsp.fConst3 = 95;
+dsp.fHslider13 = 96;
+dsp.fConst4 = 97;
+dsp.fRec13 = 98;
+dsp.fRec14 = 100;
+dsp.iRec15 = 102;
+dsp.fRec12 = 104;
+dsp.fRec11 = 106;
+dsp.fRec10 = 108;
+dsp.fRec9 = 110;
+dsp.fRec8 = 112;
+dsp.fRec7 = 114;
+dsp.fHslider14 = 116;
+dsp.fRec16 = 117;
+dsp.fRec5 = 119;
+dsp.fHslider15 = 121;
+dsp.fRec17 = 122;
+dsp.fHslider16 = 124;
+dsp.fRec18 = 125;
+dsp.fRec0 = 127;
+dsp.fHslider17 = 131199;
+dsp.fRec20 = 131200;
+dsp.fRec19 = 131202;
+dsp.fHslider18 = 131204;
+dsp.fRec21 = 131205;
+dsp.iVec0 = 262277;
+dsp.iRec1 = 262279;
+dsp.fSlow0 = 262281;
+dsp.fSlow1 = 262282;
+dsp.fSlow2 = 262283;
+dsp.fSlow3 = 262284;
+dsp.fSlow4 = 262285;
+dsp.fSlow5 = 262286;
+dsp.fSlow6 = 262287;
+dsp.iSlow7 = 262288;
+dsp.fSlow8 = 262289;
+dsp.fSlow9 = 262290;
+dsp.iSlow10 = 262291;
+dsp.fSlow11 = 262292;
+dsp.fSlow12 = 262293;
+dsp.fSlow13 = 262294;
+dsp.fSlow14 = 262295;
+dsp.iSlow15 = 262296;
+dsp.fSlow16 = 262297;
+dsp.fSlow17 = 262298;
+dsp.fSlow18 = 262299;
+dsp.fSlow19 = 262300;
+dsp.fSlow20 = 262301;
+dsp.fSlow21 = 262302;
+dsp.fSlow22 = 262303;
+dsp.fSlow23 = 262304;
+dsp.fSlow24 = 262305;
+dsp.fSlow25 = 262306;
+dsp.fSlow26 = 262307;
+dsp.fSlow27 = 262308;
+dsp.fSlow28 = 262309;
+dsp.fSlow29 = 262310;
+dsp.fSlow30 = 262311;
+dsp.key_id = 262312;
+dsp.gate = 262313;
+dsp.output0 = 262314; 
+dsp.output1 = 262315; 
 
 function create_instances() (
 	voice_idx = 0;
 	while(voice_idx < nvoices) (
 		obj = MEMORY.alloc_memory(dsp.size);
-		memset( obj + dsp.fVec0, 0, 64);
 		memset( obj + dsp.iVec1, 0, 2);
-		memset( obj + dsp.iVec2, 0, 2);
-		memset( obj + dsp.iRec1, 0, 2);
-		memset( obj + dsp.fRec0, 0, 2);
-		memset( obj + dsp.fRec4, 0, 2);
-		memset( obj + dsp.fRec11, 0, 2);
+		memset( obj + dsp.fRec2, 0, 2);
+		memset( obj + dsp.fVec2, 0, 64);
+		memset( obj + dsp.iVec3, 0, 2);
+		memset( obj + dsp.iRec4, 0, 2);
+		memset( obj + dsp.fRec3, 0, 2);
+		memset( obj + dsp.fRec6, 0, 2);
+		memset( obj + dsp.fRec13, 0, 2);
+		memset( obj + dsp.fRec14, 0, 2);
+		memset( obj + dsp.iRec15, 0, 2);
 		memset( obj + dsp.fRec12, 0, 2);
-		memset( obj + dsp.iRec13, 0, 2);
+		memset( obj + dsp.fRec11, 0, 2);
 		memset( obj + dsp.fRec10, 0, 2);
 		memset( obj + dsp.fRec9, 0, 2);
 		memset( obj + dsp.fRec8, 0, 2);
 		memset( obj + dsp.fRec7, 0, 2);
-		memset( obj + dsp.fRec6, 0, 2);
+		memset( obj + dsp.fRec16, 0, 2);
 		memset( obj + dsp.fRec5, 0, 2);
-		memset( obj + dsp.fRec14, 0, 2);
-		memset( obj + dsp.fRec3, 0, 2);
-		memset( obj + dsp.iVec3, 0, 2);
-		memset( obj + dsp.iRec2, 0, 2);
+		memset( obj + dsp.fRec17, 0, 2);
+		memset( obj + dsp.fRec18, 0, 2);
+		memset( obj + dsp.fRec0, 0, 131072);
+		memset( obj + dsp.fRec20, 0, 2);
+		memset( obj + dsp.fRec19, 0, 2);
+		memset( obj + dsp.fRec21, 0, 131072);
+		memset( obj + dsp.iVec0, 0, 2);
+		memset( obj + dsp.iRec1, 0, 2);
 		voice_idx += 1; 
 	);
 );
 
 function init_instances() (
 	obj[dsp.fButton0] = 0;
-	obj[dsp.fHslider0] = 0.25;
-	obj[dsp.fHslider5] = 440;
+	obj[dsp.fHslider10] = 440;
 	
 	voice_idx = 0; 
 	while(voice_idx < nvoices) ( 
 		obj = dsp.memory + dsp.size * voice_idx;
 		obj[dsp.IOTA0] = 0;
 		
-		l0 = 0;
-		
-		while(l0 < 64)
-		(
-			obj[dsp.fVec0 + l0] = 0.0000000000000000;
-			l0 = int32(add32(l0, 1));
-		
-		);
-		l1 = 0;
-		
-		while(l1 < 2)
-		(
-			obj[dsp.iVec1 + l1] = 0;
-			l1 = int32(add32(l1, 1));
-		
-		);
 		l2 = 0;
 		
 		while(l2 < 2)
 		(
-			obj[dsp.iVec2 + l2] = 0;
+			obj[dsp.iVec1 + l2] = 0;
 			l2 = int32(add32(l2, 1));
 		
 		);
@@ -311,23 +362,39 @@ function init_instances() (
 		
 		while(l3 < 2)
 		(
-			obj[dsp.iRec1 + l3] = 0;
+			obj[dsp.fRec2 + l3] = 0.0000000000000000;
 			l3 = int32(add32(l3, 1));
 		
 		);
 		l4 = 0;
 		
-		while(l4 < 2)
+		while(l4 < 64)
 		(
-			obj[dsp.fRec0 + l4] = 0.0000000000000000;
+			obj[dsp.fVec2 + l4] = 0.0000000000000000;
 			l4 = int32(add32(l4, 1));
+		
+		);
+		l5 = 0;
+		
+		while(l5 < 2)
+		(
+			obj[dsp.iVec3 + l5] = 0;
+			l5 = int32(add32(l5, 1));
+		
+		);
+		l6 = 0;
+		
+		while(l6 < 2)
+		(
+			obj[dsp.iRec4 + l6] = 0;
+			l6 = int32(add32(l6, 1));
 		
 		);
 		l7 = 0;
 		
 		while(l7 < 2)
 		(
-			obj[dsp.fRec4 + l7] = 0.0000000000000000;
+			obj[dsp.fRec3 + l7] = 0.0000000000000000;
 			l7 = int32(add32(l7, 1));
 		
 		);
@@ -335,7 +402,7 @@ function init_instances() (
 		
 		while(l8 < 2)
 		(
-			obj[dsp.fRec11 + l8] = 0.0000000000000000;
+			obj[dsp.fRec6 + l8] = 0.0000000000000000;
 			l8 = int32(add32(l8, 1));
 		
 		);
@@ -343,7 +410,7 @@ function init_instances() (
 		
 		while(l9 < 2)
 		(
-			obj[dsp.fRec12 + l9] = 0.0000000000000000;
+			obj[dsp.fRec13 + l9] = 0.0000000000000000;
 			l9 = int32(add32(l9, 1));
 		
 		);
@@ -351,7 +418,7 @@ function init_instances() (
 		
 		while(l10 < 2)
 		(
-			obj[dsp.iRec13 + l10] = 0;
+			obj[dsp.fRec14 + l10] = 0.0000000000000000;
 			l10 = int32(add32(l10, 1));
 		
 		);
@@ -359,7 +426,7 @@ function init_instances() (
 		
 		while(l11 < 2)
 		(
-			obj[dsp.fRec10 + l11] = 0.0000000000000000;
+			obj[dsp.iRec15 + l11] = 0;
 			l11 = int32(add32(l11, 1));
 		
 		);
@@ -367,7 +434,7 @@ function init_instances() (
 		
 		while(l12 < 2)
 		(
-			obj[dsp.fRec9 + l12] = 0.0000000000000000;
+			obj[dsp.fRec12 + l12] = 0.0000000000000000;
 			l12 = int32(add32(l12, 1));
 		
 		);
@@ -375,7 +442,7 @@ function init_instances() (
 		
 		while(l13 < 2)
 		(
-			obj[dsp.fRec8 + l13] = 0.0000000000000000;
+			obj[dsp.fRec11 + l13] = 0.0000000000000000;
 			l13 = int32(add32(l13, 1));
 		
 		);
@@ -383,7 +450,7 @@ function init_instances() (
 		
 		while(l14 < 2)
 		(
-			obj[dsp.fRec7 + l14] = 0.0000000000000000;
+			obj[dsp.fRec10 + l14] = 0.0000000000000000;
 			l14 = int32(add32(l14, 1));
 		
 		);
@@ -391,7 +458,7 @@ function init_instances() (
 		
 		while(l15 < 2)
 		(
-			obj[dsp.fRec6 + l15] = 0.0000000000000000;
+			obj[dsp.fRec9 + l15] = 0.0000000000000000;
 			l15 = int32(add32(l15, 1));
 		
 		);
@@ -399,7 +466,7 @@ function init_instances() (
 		
 		while(l16 < 2)
 		(
-			obj[dsp.fRec5 + l16] = 0.0000000000000000;
+			obj[dsp.fRec8 + l16] = 0.0000000000000000;
 			l16 = int32(add32(l16, 1));
 		
 		);
@@ -407,7 +474,7 @@ function init_instances() (
 		
 		while(l17 < 2)
 		(
-			obj[dsp.fRec14 + l17] = 0.0000000000000000;
+			obj[dsp.fRec7 + l17] = 0.0000000000000000;
 			l17 = int32(add32(l17, 1));
 		
 		);
@@ -415,43 +482,100 @@ function init_instances() (
 		
 		while(l18 < 2)
 		(
-			obj[dsp.fRec3 + l18] = 0.0000000000000000;
+			obj[dsp.fRec16 + l18] = 0.0000000000000000;
 			l18 = int32(add32(l18, 1));
 		
 		);
-		l5_re0 = 0;
+		l19 = 0;
 		
-		while(l5_re0 < 2)
+		while(l19 < 2)
 		(
-			obj[dsp.iVec3 + l5_re0] = 0;
-			l5_re0 = int32(add32(l5_re0, 1));
+			obj[dsp.fRec5 + l19] = 0.0000000000000000;
+			l19 = int32(add32(l19, 1));
 		
 		);
-		l6_re0 = 0;
+		l20 = 0;
 		
-		while(l6_re0 < 2)
+		while(l20 < 2)
 		(
-			obj[dsp.iRec2 + l6_re0] = 0;
-			l6_re0 = int32(add32(l6_re0, 1));
+			obj[dsp.fRec17 + l20] = 0.0000000000000000;
+			l20 = int32(add32(l20, 1));
+		
+		);
+		l21 = 0;
+		
+		while(l21 < 2)
+		(
+			obj[dsp.fRec18 + l21] = 0.0000000000000000;
+			l21 = int32(add32(l21, 1));
+		
+		);
+		l22 = 0;
+		
+		while(l22 < 131072)
+		(
+			obj[dsp.fRec0 + l22] = 0.0000000000000000;
+			l22 = int32(add32(l22, 1));
+		
+		);
+		l23 = 0;
+		
+		while(l23 < 2)
+		(
+			obj[dsp.fRec20 + l23] = 0.0000000000000000;
+			l23 = int32(add32(l23, 1));
+		
+		);
+		l24 = 0;
+		
+		while(l24 < 2)
+		(
+			obj[dsp.fRec19 + l24] = 0.0000000000000000;
+			l24 = int32(add32(l24, 1));
+		
+		);
+		l25 = 0;
+		
+		while(l25 < 131072)
+		(
+			obj[dsp.fRec21 + l25] = 0.0000000000000000;
+			l25 = int32(add32(l25, 1));
+		
+		);
+		l0_re0 = 0;
+		
+		while(l0_re0 < 2)
+		(
+			obj[dsp.iVec0 + l0_re0] = 0;
+			l0_re0 = int32(add32(l0_re0, 1));
+		
+		);
+		l1_re0 = 0;
+		
+		while(l1_re0 < 2)
+		(
+			obj[dsp.iRec1 + l1_re0] = 0;
+			l1_re0 = int32(add32(l1_re0, 1));
 		
 		);
 		i1_re0 = 0;
 		
 		while(i1_re0 < 65536)
 		(
-			obj[dsp.iVec3 + 0] = 1;
-			obj[dsp.iRec2 + 0] = (int32(add32(obj[dsp.iVec3 + 1], obj[dsp.iRec2 + 1])) % 65536);
-			ftbl0mydspSIG0[i1_re0] = sin((0.0000958738019108 * (obj[dsp.iRec2 + 0])));
-			obj[dsp.iVec3 + 1] = obj[dsp.iVec3 + 0];
-			obj[dsp.iRec2 + 1] = obj[dsp.iRec2 + 0];
+			obj[dsp.iVec0 + 0] = 1;
+			obj[dsp.iRec1 + 0] = (int32(add32(obj[dsp.iVec0 + 1], obj[dsp.iRec1 + 1])) % 65536);
+			ftbl0mydspSIG0[i1_re0] = sin((0.0000958738019108 * (obj[dsp.iRec1 + 0])));
+			obj[dsp.iVec0 + 1] = obj[dsp.iVec0 + 0];
+			obj[dsp.iRec1 + 1] = obj[dsp.iRec1 + 0];
 			i1_re0 = int32(add32(i1_re0, 1));
 		
 		);
 		obj[dsp.fSampleRate] = srate;
 		obj[dsp.fConst0] = min(192000.0000000000000000, max(1.0000000000000000, (obj[dsp.fSampleRate])));
-		obj[dsp.fConst1] = (1.0000000000000000 / obj[dsp.fConst0]);
-		obj[dsp.fConst2] = (3.1415927410125732 / obj[dsp.fConst0]);
-		obj[dsp.fConst3] = (6.2831854820251465 / obj[dsp.fConst0]);
+		obj[dsp.fConst1] = (0.5000000000000000 * obj[dsp.fConst0]);
+		obj[dsp.fConst2] = (1.0000000000000000 / obj[dsp.fConst0]);
+		obj[dsp.fConst3] = (3.1415927410125732 / obj[dsp.fConst0]);
+		obj[dsp.fConst4] = (6.2831854820251465 / obj[dsp.fConst0]);
 		voice_idx += 1;
 	); 
 );
@@ -463,30 +587,55 @@ function control() (
 	voice_idx = 0;
 	while(voice_idx < nvoices) (
 		obj = dsp.memory + dsp.size * voice_idx;
-		obj[dsp.fHslider7] = fHslider7;
-		obj[dsp.fHslider8] = fHslider8;
-		obj[dsp.fHslider6] = fHslider6;
-		obj[dsp.fHslider9] = fHslider9;
+		obj[dsp.fHslider5] = fHslider5;
+		obj[dsp.fHslider1] = fHslider1;
+		obj[dsp.fHslider0] = fHslider0;
+		obj[dsp.fHslider3] = fHslider3;
 		obj[dsp.fHslider4] = fHslider4;
 		obj[dsp.fHslider2] = fHslider2;
-		obj[dsp.fHslider1] = fHslider1;
-		obj[dsp.fHslider3] = fHslider3;
+		obj[dsp.fHslider13] = fHslider13;
+		obj[dsp.fHslider18] = fHslider18;
+		obj[dsp.fHslider11] = fHslider11;
+		obj[dsp.fHslider8] = fHslider8;
+		obj[dsp.fHslider16] = fHslider16;
+		obj[dsp.fHslider15] = fHslider15;
+		obj[dsp.fHslider17] = fHslider17;
+		obj[dsp.fHslider14] = fHslider14;
+		obj[dsp.fHslider12] = fHslider12;
+		obj[dsp.fHslider9] = fHslider9;
+		obj[dsp.fHslider6] = fHslider6;
+		obj[dsp.fHslider7] = fHslider7;
 		obj[dsp.fSlow0] = obj[dsp.fHslider0];
-		obj[dsp.fSlow1] = obj[dsp.fButton0];
-		obj[dsp.iSlow2] = (obj[dsp.fSlow1] > 0.0000000000000000);
-		obj[dsp.fSlow3] = max(0.0299999993294477, obj[dsp.fHslider1]);
-		obj[dsp.fSlow4] = max(0.0049999998882413, obj[dsp.fHslider2]);
-		obj[dsp.iSlow5] = int32(ftoi32((obj[dsp.fConst0] * obj[dsp.fSlow4])));
-		obj[dsp.fSlow6] = max(0.0049999998882413, obj[dsp.fHslider3]);
-		obj[dsp.fSlow7] = (obj[dsp.iSlow2]);
-		obj[dsp.fSlow8] = (obj[dsp.fHslider4] * obj[dsp.fSlow7]);
-		obj[dsp.fSlow9] = obj[dsp.fHslider5];
-		obj[dsp.iSlow10] = (obj[dsp.fSlow1] == 0.0000000000000000);
-		obj[dsp.fSlow11] = (obj[dsp.fHslider6] * obj[dsp.fHslider7]);
-		obj[dsp.fSlow12] = obj[dsp.fHslider8];
-		obj[dsp.fSlow13] = (obj[dsp.fConst2] * obj[dsp.fSlow12]);
-		obj[dsp.fSlow14] = (obj[dsp.fConst3] * obj[dsp.fSlow12]);
-		obj[dsp.fSlow15] = (obj[dsp.fConst1] * obj[dsp.fHslider9]);
+		obj[dsp.fSlow1] = obj[dsp.fHslider1];
+		obj[dsp.fSlow2] = obj[dsp.fHslider2];
+		obj[dsp.fSlow3] = (obj[dsp.fConst0] * obj[dsp.fHslider3]);
+		obj[dsp.fSlow4] = (obj[dsp.fConst2] * obj[dsp.fHslider4]);
+		obj[dsp.fSlow5] = obj[dsp.fHslider5];
+		obj[dsp.fSlow6] = obj[dsp.fButton0];
+		obj[dsp.iSlow7] = (obj[dsp.fSlow6] > 0.0000000000000000);
+		obj[dsp.fSlow8] = max(0.0299999993294477, obj[dsp.fHslider6]);
+		obj[dsp.fSlow9] = max(0.0049999998882413, obj[dsp.fHslider7]);
+		obj[dsp.iSlow10] = int32(ftoi32((obj[dsp.fConst0] * obj[dsp.fSlow9])));
+		obj[dsp.fSlow11] = max(0.0049999998882413, obj[dsp.fHslider8]);
+		obj[dsp.fSlow12] = (obj[dsp.iSlow7]);
+		obj[dsp.fSlow13] = (obj[dsp.fHslider9] * obj[dsp.fSlow12]);
+		obj[dsp.fSlow14] = obj[dsp.fHslider10];
+		obj[dsp.iSlow15] = (obj[dsp.fSlow6] == 0.0000000000000000);
+		obj[dsp.fSlow16] = (obj[dsp.fHslider11] * obj[dsp.fHslider12]);
+		obj[dsp.fSlow17] = obj[dsp.fHslider13];
+		obj[dsp.fSlow18] = (obj[dsp.fConst3] * obj[dsp.fSlow17]);
+		obj[dsp.fSlow19] = (obj[dsp.fConst4] * obj[dsp.fSlow17]);
+		obj[dsp.fSlow20] = (obj[dsp.fConst2] * obj[dsp.fHslider14]);
+		obj[dsp.fSlow21] = (obj[dsp.fConst2] * obj[dsp.fHslider15]);
+		obj[dsp.fSlow22] = obj[dsp.fHslider16];
+		obj[dsp.fSlow23] = (obj[dsp.fConst2] * obj[dsp.fHslider17]);
+		obj[dsp.fSlow24] = obj[dsp.fHslider18];
+		obj[dsp.fSlow25] = min(0.5000000000000000, max(0.0099999997764826, (0.5000000000000000 * (1.0000000000000000 - obj[dsp.fSlow24]))));
+		obj[dsp.fSlow26] = (0.5000000000000000 - obj[dsp.fSlow25]);
+		obj[dsp.fSlow27] = (obj[dsp.fSlow26] / obj[dsp.fSlow25]);
+		obj[dsp.fSlow28] = (0.2500000000000000 * obj[dsp.fSlow24]);
+		obj[dsp.fSlow29] = (obj[dsp.fSlow26] / (1.0000000000000000 - obj[dsp.fSlow25]));
+		obj[dsp.fSlow30] = (0.2500000000000000 * (obj[dsp.fSlow24] + 1.0000000000000000));
 		voice_idx += 1;
 	);
 );
@@ -498,7 +647,7 @@ while (midirecv(mpos, msg1, msg2, msg3)) (
 	channel = msg1&0x0F; 
 	(status == NOTE_ON) ? ( 
 		midi_event += 1; 
-		(msg2 == 0x0) ? (fHslider5 = midi_scale(0xF0&msg3, 20.0000000000000000, 20000.0000000000000000, 0.1000000000000000));
+		(msg2 == 0x0) ? (fHslider10 = midi_scale(0xF0&msg3, 20.0000000000000000, 20000.0000000000000000, 0.1000000000000000));
 	); 
 	(status == NOTE_ON) ? ( 
 		midi_event += 1;
@@ -508,8 +657,7 @@ while (midirecv(mpos, msg1, msg2, msg3)) (
 		obj[dsp.key_id] = msg2;
 		obj[dsp.gate] = 1;
 		obj[dsp.fButton0] = 1;
-		obj[dsp.fHslider0] = midi_scale(msg3, 0.0000000000000000, 1.0000000000000000, 0.0100000000000000);
-		obj[dsp.fHslider5] = limit(mtof(msg2), 20.0000000000000000, 20000.0000000000000000);
+		obj[dsp.fHslider10] = limit(mtof(msg2), 20.0000000000000000, 20000.0000000000000000);
 	); // NOTE ON condition off 
 	(status == NOTE_OFF) ? (
 		midi_event += 1;
@@ -537,59 +685,83 @@ control();
 voice_idx = 0;
 while(voice_idx < nvoices) (
 	obj = dsp.memory + dsp.size * voice_idx;
-	obj[dsp.fVec0 + (obj[dsp.IOTA0] & 63)] = obj[dsp.fSlow1];
-	obj[dsp.iVec1 + 0] = obj[dsp.iSlow2];
-	obj[dsp.iVec2 + 0] = 1;
-	obj[dsp.iRec1 + 0] = int32(mul32(obj[dsp.iSlow2], int32(add32(obj[dsp.iRec1 + 1], 1))));
-	iTemp0 = int32(sub32(obj[dsp.iSlow2], obj[dsp.iVec1 + 1]));
-	iTemp1 = ((obj[dsp.iRec1 + 0] < obj[dsp.iSlow5]) | (iTemp0 * (iTemp0 > 0)));
-	fTemp2 = (0.1447177976369858 * ((obj[dsp.iSlow2] != 0) ? ((iTemp1 != 0) ? obj[dsp.fSlow4] : obj[dsp.fSlow6]) : obj[dsp.fSlow3]));
-	iTemp3 = (abs(fTemp2) < 0.0000001192092896);
-	fTemp4 = ((iTemp3 != 0) ? 0.0000000000000000 : exp(-((obj[dsp.fConst1] / ((iTemp3 != 0) ? 1.0000000000000000 : fTemp2)))));
-	obj[dsp.fRec0 + 0] = (((1.0000000000000000 - fTemp4) * ((obj[dsp.iSlow2] != 0) ? ((iTemp1 != 0) ? obj[dsp.fSlow7] : obj[dsp.fSlow8]) : 0.0000000000000000)) + (fTemp4 * obj[dsp.fRec0 + 1]));
-	iTemp5 = int32(sub32(1, obj[dsp.iVec2 + 1]));
-	fTemp6 = (((obj[dsp.fSlow1] == obj[dsp.fVec0 + (int32(sub32(obj[dsp.IOTA0], 32)) & 63)]) | obj[dsp.iSlow10]));
-	obj[dsp.fRec4 + 0] = ((obj[dsp.fSlow9] * (1.0000000000000000 - (0.9990000128746033 * fTemp6))) + (0.9990000128746033 * (fTemp6 * obj[dsp.fRec4 + 1])));
-	fTemp7 = (1.0000000000000000 / tan((obj[dsp.fSlow13] * obj[dsp.fRec4 + 0])));
-	fTemp8 = (1.0000000000000000 - fTemp7);
-	fTemp9 = (obj[dsp.fSlow14] * obj[dsp.fRec4 + 0]);
-	fTemp10 = sin(fTemp9);
-	fTemp11 = cos(fTemp9);
-	obj[dsp.fRec11 + 0] = ((obj[dsp.fRec12 + 1] * fTemp10) + (obj[dsp.fRec11 + 1] * fTemp11));
-	obj[dsp.fRec12 + 0] = (((iTemp5) + (obj[dsp.fRec12 + 1] * fTemp11)) - (fTemp10 * obj[dsp.fRec11 + 1]));
-	iTemp12 = ((obj[dsp.fRec11 + 1] <= 0.0000000000000000) & (obj[dsp.fRec11 + 0] > 0.0000000000000000));
-	obj[dsp.iRec13 + 0] = int32(add32(int32(mul32(1103515245, obj[dsp.iRec13 + 1])), 12345));
-	obj[dsp.fRec10 + 0] = ((obj[dsp.fRec10 + 1] * (int32(sub32(1, iTemp12)))) + (0.0000000004656613 * ((obj[dsp.iRec13 + 0]) * (iTemp12))));
-	fTemp13 = (fTemp7 + 1.0000000000000000);
-	obj[dsp.fRec9 + 0] = -((((fTemp8 * obj[dsp.fRec9 + 1]) - (obj[dsp.fRec10 + 0] + obj[dsp.fRec10 + 1])) / fTemp13));
-	obj[dsp.fRec8 + 0] = -((((fTemp8 * obj[dsp.fRec8 + 1]) - (obj[dsp.fRec9 + 0] + obj[dsp.fRec9 + 1])) / fTemp13));
-	obj[dsp.fRec7 + 0] = -((((fTemp8 * obj[dsp.fRec7 + 1]) - (obj[dsp.fRec8 + 0] + obj[dsp.fRec8 + 1])) / fTemp13));
-	obj[dsp.fRec6 + 0] = -((((fTemp8 * obj[dsp.fRec6 + 1]) - (obj[dsp.fRec7 + 0] + obj[dsp.fRec7 + 1])) / fTemp13));
-	obj[dsp.fRec5 + 0] = -((((obj[dsp.fRec5 + 1] * fTemp8) - (obj[dsp.fRec6 + 0] + obj[dsp.fRec6 + 1])) / fTemp13));
-	fTemp14 = ((iTemp5 != 0) ? 0.0000000000000000 : (obj[dsp.fSlow15] + obj[dsp.fRec14 + 1]));
-	obj[dsp.fRec14 + 0] = (fTemp14 - floor(fTemp14));
-	fTemp15 = ((iTemp5 != 0) ? 0.0000000000000000 : (obj[dsp.fRec3 + 1] + (obj[dsp.fConst1] * (obj[dsp.fRec4 + 0] + (obj[dsp.fSlow11] * (obj[dsp.fRec5 + 0] * ftbl0mydspSIG0[max(0, min(int32(ftoi32((65536.0000000000000000 * obj[dsp.fRec14 + 0]))), 65535))]))))));
-	obj[dsp.fRec3 + 0] = (fTemp15 - floor(fTemp15));
-	fTemp16 = (obj[dsp.fSlow0] * (obj[dsp.fRec0 + 0] * ftbl0mydspSIG0[max(0, min(int32(ftoi32((65536.0000000000000000 * obj[dsp.fRec3 + 0]))), 65535))]));
-	obj[dsp.output0] = fTemp16;
-	obj[dsp.output1] = (obj[dsp.fSlow0] * (obj[dsp.fRec0 + 0] * (1.0000000000000000 - fTemp16)));
+	obj[dsp.iVec1 + 0] = 1;
+	iTemp0 = int32(sub32(1, obj[dsp.iVec1 + 1]));
+	fTemp1 = ((iTemp0 != 0) ? 0.0000000000000000 : (obj[dsp.fSlow4] + obj[dsp.fRec2 + 1]));
+	obj[dsp.fRec2 + 0] = (fTemp1 - floor(fTemp1));
+	iTemp2 = int32(add32(int32(ftoi32(min(obj[dsp.fConst1], max(0.0000000000000000, (obj[dsp.fSlow3] * ftbl0mydspSIG0[max(0, min(int32(ftoi32((65536.0000000000000000 * obj[dsp.fRec2 + 0]))), 65535))]))))), 1));
+	obj[dsp.fVec2 + (obj[dsp.IOTA0] & 63)] = obj[dsp.fSlow6];
+	obj[dsp.iVec3 + 0] = obj[dsp.iSlow7];
+	obj[dsp.iRec4 + 0] = int32(mul32(obj[dsp.iSlow7], int32(add32(obj[dsp.iRec4 + 1], 1))));
+	iTemp3 = int32(sub32(obj[dsp.iSlow7], obj[dsp.iVec3 + 1]));
+	iTemp4 = ((obj[dsp.iRec4 + 0] < obj[dsp.iSlow10]) | (iTemp3 * (iTemp3 > 0)));
+	fTemp5 = (0.1447177976369858 * ((obj[dsp.iSlow7] != 0) ? ((iTemp4 != 0) ? obj[dsp.fSlow9] : obj[dsp.fSlow11]) : obj[dsp.fSlow8]));
+	iTemp6 = (abs(fTemp5) < 0.0000001192092896);
+	fTemp7 = ((iTemp6 != 0) ? 0.0000000000000000 : exp(-((obj[dsp.fConst2] / ((iTemp6 != 0) ? 1.0000000000000000 : fTemp5)))));
+	obj[dsp.fRec3 + 0] = (((1.0000000000000000 - fTemp7) * ((obj[dsp.iSlow7] != 0) ? ((iTemp4 != 0) ? obj[dsp.fSlow12] : obj[dsp.fSlow13]) : 0.0000000000000000)) + (fTemp7 * obj[dsp.fRec3 + 1]));
+	fTemp8 = (((obj[dsp.fSlow6] == obj[dsp.fVec2 + (int32(sub32(obj[dsp.IOTA0], 32)) & 63)]) | obj[dsp.iSlow15]));
+	obj[dsp.fRec6 + 0] = ((obj[dsp.fSlow14] * (1.0000000000000000 - (0.9990000128746033 * fTemp8))) + (0.9990000128746033 * (fTemp8 * obj[dsp.fRec6 + 1])));
+	fTemp9 = (1.0000000000000000 / tan((obj[dsp.fSlow18] * obj[dsp.fRec6 + 0])));
+	fTemp10 = (1.0000000000000000 - fTemp9);
+	fTemp11 = (obj[dsp.fSlow19] * obj[dsp.fRec6 + 0]);
+	fTemp12 = sin(fTemp11);
+	fTemp13 = cos(fTemp11);
+	obj[dsp.fRec13 + 0] = ((obj[dsp.fRec14 + 1] * fTemp12) + (obj[dsp.fRec13 + 1] * fTemp13));
+	obj[dsp.fRec14 + 0] = (((iTemp0) + (obj[dsp.fRec14 + 1] * fTemp13)) - (fTemp12 * obj[dsp.fRec13 + 1]));
+	iTemp14 = ((obj[dsp.fRec13 + 1] <= 0.0000000000000000) & (obj[dsp.fRec13 + 0] > 0.0000000000000000));
+	obj[dsp.iRec15 + 0] = int32(add32(int32(mul32(1103515245, obj[dsp.iRec15 + 1])), 12345));
+	obj[dsp.fRec12 + 0] = ((obj[dsp.fRec12 + 1] * (int32(sub32(1, iTemp14)))) + (0.0000000004656613 * ((obj[dsp.iRec15 + 0]) * (iTemp14))));
+	fTemp15 = (fTemp9 + 1.0000000000000000);
+	obj[dsp.fRec11 + 0] = -((((fTemp10 * obj[dsp.fRec11 + 1]) - (obj[dsp.fRec12 + 0] + obj[dsp.fRec12 + 1])) / fTemp15));
+	obj[dsp.fRec10 + 0] = -((((fTemp10 * obj[dsp.fRec10 + 1]) - (obj[dsp.fRec11 + 0] + obj[dsp.fRec11 + 1])) / fTemp15));
+	obj[dsp.fRec9 + 0] = -((((fTemp10 * obj[dsp.fRec9 + 1]) - (obj[dsp.fRec10 + 0] + obj[dsp.fRec10 + 1])) / fTemp15));
+	obj[dsp.fRec8 + 0] = -((((fTemp10 * obj[dsp.fRec8 + 1]) - (obj[dsp.fRec9 + 0] + obj[dsp.fRec9 + 1])) / fTemp15));
+	obj[dsp.fRec7 + 0] = -((((obj[dsp.fRec7 + 1] * fTemp10) - (obj[dsp.fRec8 + 0] + obj[dsp.fRec8 + 1])) / fTemp15));
+	fTemp16 = ((iTemp0 != 0) ? 0.0000000000000000 : (obj[dsp.fSlow20] + obj[dsp.fRec16 + 1]));
+	obj[dsp.fRec16 + 0] = (fTemp16 - floor(fTemp16));
+	fTemp17 = (obj[dsp.fRec6 + 0] + (obj[dsp.fSlow16] * (obj[dsp.fRec7 + 0] * ftbl0mydspSIG0[max(0, min(int32(ftoi32((65536.0000000000000000 * obj[dsp.fRec16 + 0]))), 65535))])));
+	fTemp18 = ((iTemp0 != 0) ? 0.0000000000000000 : (obj[dsp.fRec5 + 1] + (obj[dsp.fConst2] * fTemp17)));
+	obj[dsp.fRec5 + 0] = (fTemp18 - floor(fTemp18));
+	fTemp19 = ftbl0mydspSIG0[max(0, min(int32(ftoi32((65536.0000000000000000 * obj[dsp.fRec5 + 0]))), 65535))];
+	fTemp20 = ((iTemp0 != 0) ? 0.0000000000000000 : (obj[dsp.fSlow21] + obj[dsp.fRec17 + 1]));
+	obj[dsp.fRec17 + 0] = (fTemp20 - floor(fTemp20));
+	fTemp21 = ((iTemp0 != 0) ? 0.0000000000000000 : (obj[dsp.fRec18 + 1] + (obj[dsp.fConst2] * (obj[dsp.fSlow22] + fTemp17))));
+	obj[dsp.fRec18 + 0] = (fTemp21 - floor(fTemp21));
+	fTemp22 = ftbl0mydspSIG0[max(0, min(int32(ftoi32((65536.0000000000000000 * obj[dsp.fRec18 + 0]))), 65535))];
+	fTemp23 = (ftbl0mydspSIG0[max(0, min(int32(ftoi32((65536.0000000000000000 * obj[dsp.fRec17 + 0]))), 65535))] * (fTemp19 - fTemp22));
+	obj[dsp.fRec0 + (obj[dsp.IOTA0] & 131071)] = ((obj[dsp.fSlow2] * obj[dsp.fRec0 + (int32(sub32(obj[dsp.IOTA0], iTemp2)) & 131071)]) + (obj[dsp.fSlow5] * (obj[dsp.fRec3 + 0] * (fTemp19 - fTemp23))));
+	fTemp24 = ((iTemp0 != 0) ? 0.0000000000000000 : (obj[dsp.fSlow23] + obj[dsp.fRec20 + 1]));
+	obj[dsp.fRec20 + 0] = (fTemp24 - floor(fTemp24));
+	fTemp25 = ((iTemp0 != 0) ? 0.0000000000000000 : (obj[dsp.fRec19 + 1] + (obj[dsp.fConst2] * ftbl0mydspSIG0[max(0, min(int32(ftoi32((65536.0000000000000000 * obj[dsp.fRec20 + 0]))), 65535))])));
+	obj[dsp.fRec19 + 0] = (fTemp25 - floor(fTemp25));
+	fTemp26 = floor(((obj[dsp.fRec19 + 0] + 0.7500000000000000) - obj[dsp.fSlow28]));
+	fTemp27 = (0.7500000000000000 - fTemp26);
+	fTemp28 = cos((6.2831854820251465 * (((obj[dsp.fRec19 + 0] + min((obj[dsp.fSlow27] * ((obj[dsp.fRec19 + 0] + fTemp27) - obj[dsp.fSlow28])), (obj[dsp.fSlow29] * (obj[dsp.fSlow30] + (fTemp26 - obj[dsp.fRec19 + 0]))))) + fTemp27) - obj[dsp.fSlow28])));
+	obj[dsp.output0] = min(obj[dsp.fSlow0], max(obj[dsp.fSlow1], (obj[dsp.fRec0 + (obj[dsp.IOTA0] & 131071)] * fTemp28)));
+	obj[dsp.fRec21 + (obj[dsp.IOTA0] & 131071)] = ((obj[dsp.fSlow2] * obj[dsp.fRec21 + (int32(sub32(obj[dsp.IOTA0], iTemp2)) & 131071)]) + (obj[dsp.fSlow5] * (obj[dsp.fRec3 + 0] * (fTemp22 + fTemp23))));
+	obj[dsp.output1] = min(obj[dsp.fSlow0], max(obj[dsp.fSlow1], (obj[dsp.fRec21 + (obj[dsp.IOTA0] & 131071)] * fTemp28)));
 	obj[dsp.IOTA0] = int32(add32(obj[dsp.IOTA0], 1));
 	obj[dsp.iVec1 + 1] = obj[dsp.iVec1 + 0];
-	obj[dsp.iVec2 + 1] = obj[dsp.iVec2 + 0];
-	obj[dsp.iRec1 + 1] = obj[dsp.iRec1 + 0];
-	obj[dsp.fRec0 + 1] = obj[dsp.fRec0 + 0];
-	obj[dsp.fRec4 + 1] = obj[dsp.fRec4 + 0];
-	obj[dsp.fRec11 + 1] = obj[dsp.fRec11 + 0];
+	obj[dsp.fRec2 + 1] = obj[dsp.fRec2 + 0];
+	obj[dsp.iVec3 + 1] = obj[dsp.iVec3 + 0];
+	obj[dsp.iRec4 + 1] = obj[dsp.iRec4 + 0];
+	obj[dsp.fRec3 + 1] = obj[dsp.fRec3 + 0];
+	obj[dsp.fRec6 + 1] = obj[dsp.fRec6 + 0];
+	obj[dsp.fRec13 + 1] = obj[dsp.fRec13 + 0];
+	obj[dsp.fRec14 + 1] = obj[dsp.fRec14 + 0];
+	obj[dsp.iRec15 + 1] = obj[dsp.iRec15 + 0];
 	obj[dsp.fRec12 + 1] = obj[dsp.fRec12 + 0];
-	obj[dsp.iRec13 + 1] = obj[dsp.iRec13 + 0];
+	obj[dsp.fRec11 + 1] = obj[dsp.fRec11 + 0];
 	obj[dsp.fRec10 + 1] = obj[dsp.fRec10 + 0];
 	obj[dsp.fRec9 + 1] = obj[dsp.fRec9 + 0];
 	obj[dsp.fRec8 + 1] = obj[dsp.fRec8 + 0];
 	obj[dsp.fRec7 + 1] = obj[dsp.fRec7 + 0];
-	obj[dsp.fRec6 + 1] = obj[dsp.fRec6 + 0];
+	obj[dsp.fRec16 + 1] = obj[dsp.fRec16 + 0];
 	obj[dsp.fRec5 + 1] = obj[dsp.fRec5 + 0];
-	obj[dsp.fRec14 + 1] = obj[dsp.fRec14 + 0];
-	obj[dsp.fRec3 + 1] = obj[dsp.fRec3 + 0];
+	obj[dsp.fRec17 + 1] = obj[dsp.fRec17 + 0];
+	obj[dsp.fRec18 + 1] = obj[dsp.fRec18 + 0];
+	obj[dsp.fRec20 + 1] = obj[dsp.fRec20 + 0];
+	obj[dsp.fRec19 + 1] = obj[dsp.fRec19 + 0];
 	voice_idx += 1;
 );
 spl0 = get_dsp(0)[dsp.output0] + get_dsp(1)[dsp.output0] + get_dsp(2)[dsp.output0] + get_dsp(3)[dsp.output0] + get_dsp(4)[dsp.output0] + get_dsp(5)[dsp.output0] + get_dsp(6)[dsp.output0] + get_dsp(7)[dsp.output0] + get_dsp(8)[dsp.output0] + get_dsp(9)[dsp.output0];
