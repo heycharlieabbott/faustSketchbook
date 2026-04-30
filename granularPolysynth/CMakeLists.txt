@@ -41,6 +41,7 @@ target_compile_definitions(granularPolysynth
         JUCE_USE_CURL=0
         JUCE_VST3_CAN_REPLACE_VST2=0
         MIDICTRL=1
+        POLY2=1
         NVOICES=NUM_VOICES
         NUM_VOICES=8
         SOUNDFILE=1

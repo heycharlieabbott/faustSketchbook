@@ -237,6 +237,7 @@ private:
 #endif
 
 #if defined(POLY2)
+#include "faust/dsp/dsp.h"
 #include "faust/dsp/dsp-combiner.h"
 #include "effect.h"
 #endif

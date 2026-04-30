@@ -19,7 +19,15 @@ if [[ ! -f "$JUCE_PLUGIN_ARCH" ]]; then
 fi
 
 OUT_CPP="$SCRIPT_DIR/granularPolysynth/FaustPluginProcessor.cpp"
+OUT_EFFECT="$SCRIPT_DIR/granularPolysynth/effect.h"
 mkdir -p "$SCRIPT_DIR/granularPolysynth"
+
+echo "Generating Faust POLY2 post-mix effect"
+faust -i --import-dir "$SCRIPT_DIR/.." \
+    -scn base_dsp \
+    -cn effect \
+    -o "$OUT_EFFECT" \
+    "$SCRIPT_DIR/effect.dsp"
 
 echo "Generating Faust → JUCE plugin sources"
 faust -scn base_dsp -uim -i --import-dir "$SCRIPT_DIR/.." \
