@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(basicFMPolysynth VERSION 1.0.0 LANGUAGES CXX)
+project(basicFMPolysynth VERSION 1.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -39,8 +39,10 @@ target_compile_definitions(basicFMPolysynth
     PUBLIC
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
+        JUCE_VST3_CAN_REPLACE_VST2=0
         MIDICTRL=1
         NVOICES=NUM_VOICES
+        NUM_VOICES=10
         FAUSTFLOAT=float
 )
 

@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${BUILD_DIR:-$SCRIPT_DIR/build}"
 CONFIG="${CONFIG:-Release}"
-JUCE_DIR="${JUCE_DIR:-/Users/charlesabbott/Development/JUCE}"
+JUCE_DIR="${JUCE_DIR:-/Users/charlesabbott/Desktop/Code/JUCE}"
 CXX_COMPILER="${CXX_COMPILER:-$(xcrun --find clang++)}"
 
 echo "Configuring basicFMPolysynth"

@@ -5,3 +5,26 @@
 basicFMPolysynth/build/
 basicFMPolysynth/.cmake/
 basicFMPolysynth/CMakeUserPresets.json
+
+# CMake/JUCE build output for granularPolysynth
+granularPolysynth/build/
+granularPolysynth/build-cmake-test/
+granularPolysynth/.cmake/
+granularPolysynth/CMakeUserPresets.json
+granularPolysynth/granularPolysynth_artefacts/
+granularPolysynth/granularPolysynth.app/
+
+# Faust-generated temporary and intermediate folders
+faust.*/
+granularPolysynth/faust.*/
+
+# Common generated project/intermediate files
+**/CMakeFiles/
+**/CMakeCache.txt
+**/cmake_install.cmake
+**/Makefile
+**/.qmake.stash
+**/*.pro.user
+**/moc_*.cpp
+**/qrc_*.cpp
+**/*.o
