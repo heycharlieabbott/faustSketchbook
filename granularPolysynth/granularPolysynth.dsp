@@ -11,14 +11,17 @@ import("../utils.dsp");
 smp = soundfile("granularSample[url:{'placeholder.wav'}]", 2);
 
 file_idx = 0;
+MAX_CLOCK_VOICES = 50;
 
-grainSpeed = max(1e-4, hslider("v:A/grainSpeed", 1, 0.001, 50, 0.001));
+clockVoices = int(hslider("v:A/clockVoices", 4, 1, MAX_CLOCK_VOICES, 1));
+grainSpeed = max(1e-4, hslider("v:A/grainSpeed", 1, 0.03, 50, 0.001));
 density = max(0.01, hslider("v:A/grainDensity [unit:Hz]", 8, 0.1, 800, 0.01));
-start = hslider("v:A/start", 0, 0, 1, 0.001) : si.smooth(0.999);
+start = hslider("v:A/start", 0.05, 0, 1, 0.001) : si.smooth(0.999);
 grainLen = hslider("v:A/grainLength", 4096, 1, 120000, 1) : si.smooth(0.999);
 grainSpeedMul = hslider("v:A/grainSpeedMultiplier", 1, 0.1, 10, 0.01);
 densityMul = hslider("v:A/grainDensityMultiplier", 1, 0.1, 1, 0.01);
 grainLenMul = hslider("v:A/grainLengthMultiplier", 1, 0.1, 10, 0.01) : si.smooth(0.999);
+dispersal = int(hslider("v:A/dispersal", 1, 1, MAX_CLOCK_VOICES, 1) / clockVoices);
 grainSpeedEff = max(1e-4, grainSpeed * grainSpeedMul);
 densityEff = max(0.01, density * densityMul);
 grainLenEff = max(1, grainLen * grainLenMul) : si.smooth(0.999);
@@ -59,10 +62,8 @@ with {
 
 };
 
-MAX_CLOCK_VOICES = 50;
-clockVoices = int(hslider("v:A/clockVoices", 4, 1, MAX_CLOCK_VOICES, 1));
 
-voiceClk(fr) = par(i, MAX_CLOCK_VOICES, clk(i))
+voiceClk(fr) = par(i, MAX_CLOCK_VOICES, clk(i + dispersal))
 with {
     periodSamples = (1.0 / max(1e-9, fr)) * ma.SR;
     enabled(i) = float(i < clockVoices);

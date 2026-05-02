@@ -52,6 +52,42 @@
 #if defined(SOUNDFILE)
 #include "faust/gui/SoundUI.h"
 
+namespace granularPolySynthSoundFileDetail
+{
+inline juce::File getSampleCacheDirectory()
+{
+    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+        .getChildFile("granularPolysynth")
+        .getChildFile("Samples");
+}
+
+/** External samples are copied here so presets store a path the plugin can always open (sandbox-friendly). */
+inline juce::File resolveFileForGranularSampler(const juce::File &source, const juce::String &bundleResourcesPath)
+{
+    if (!source.existsAsFile())
+        return {};
+
+    if (bundleResourcesPath.isNotEmpty()
+        && source.getFullPathName().startsWithIgnoreCase(bundleResourcesPath))
+        return source;
+
+    auto dir = getSampleCacheDirectory();
+    if (!dir.createDirectory())
+        return source;
+
+    const auto hash = juce::String::toHexString(juce::String(source.getFullPathName()).hashCode());
+    auto dest = dir.getChildFile(hash + "_" + source.getFileName());
+
+    if (dest.existsAsFile() && dest.getSize() == source.getSize())
+        return dest;
+
+    if (!source.copyFileTo(dest))
+        return source;
+
+    return dest;
+}
+} // namespace granularPolySynthSoundFileDetail
+
 class SoundUIBrowse : public SoundUI
 {
 public:
@@ -97,12 +133,17 @@ public:
             }
             zonesCopy = fZones;
         }
-        std::vector<std::string> file_name_list = {file.getFullPathName().toStdString()};
-        std::vector<std::string> path_name_list = fSoundReader->checkFiles(fSoundfileDir, file_name_list);
-        if (path_name_list.empty())
+        const juce::String bundleRoot =
+            fSoundfileDir.empty() ? juce::String() : juce::String(fSoundfileDir[0]);
+        const juce::File fileToLoad =
+            granularPolySynthSoundFileDetail::resolveFileForGranularSampler(file, bundleRoot);
+        if (!fileToLoad.existsAsFile())
         {
             return;
         }
+        // Do not use checkFiles() here: it can map real paths to "__empty_sound__" while we still
+        // pointed fLastLoaded at the user's file. Load the verified path directly.
+        std::vector<std::string> path_name_list = {fileToLoad.getFullPathName().toStdString()};
         Soundfile *sf = fSoundReader->createSoundfile(path_name_list, MAX_CHAN, fIsDouble);
         if (!sf)
         {
@@ -112,7 +153,7 @@ public:
         {
             *zp = sf;
         }
-        fLastLoaded = file;
+        fLastLoaded = fileToLoad;
         auto cb = fOnSampleChanged;
         if (cb)
         {
@@ -590,6 +631,7 @@ public:
     void fileDragEnter(const juce::StringArray &files, int x, int y) override;
     void fileDragExit(const juce::StringArray &files) override;
     void filesDropped(const juce::StringArray &files, int x, int y) override;
+    void refreshWaveformAfterExternalSampleChange();
 #endif
 
 private:
@@ -1008,7 +1050,31 @@ void FaustPlugInAudioProcessor::getStateInformation(juce::MemoryBlock &destData)
     // You could do that either as raw data, or use the XML or ValueTree classes
     // as intermediaries to make it easy to save and load complex data.
 
+#if defined(SOUNDFILE)
+    juce::MemoryBlock faustState;
+    fStateUI.getStateInformation(faustState);
+    juce::MemoryOutputStream out(destData, false);
+    // GPS2: sample path first (length-prefixed UTF-8). See FaustPluginProcessor.cpp comments.
+    out.writeInt(0x47505332); // 'GPS2'
+    juce::String path;
+    if (auto *su = getSoundUIBrowse())
+    {
+        const juce::File f(su->getLastLoadedFile());
+        if (f.existsAsFile())
+            path = f.getFullPathName();
+    }
+    {
+        const juce::CharPointer_UTF8 utf8 = path.toUTF8();
+        const int pathBytes = (int)utf8.sizeInBytes();
+        out.writeInt(pathBytes);
+        out.write(utf8.getAddress(), (size_t)pathBytes);
+    }
+    out.writeInt((int)faustState.getSize());
+    out.write(faustState.getData(), faustState.getSize());
+    out.flush();
+#else
     fStateUI.getStateInformation(destData);
+#endif
 }
 
 void FaustPlugInAudioProcessor::setStateInformation(const void *data, int sizeInBytes)
@@ -1016,6 +1082,99 @@ void FaustPlugInAudioProcessor::setStateInformation(const void *data, int sizeIn
     // You should use this method to restore your parameters from this memory block,
     // whose contents will have been created by the getStateInformation() call.
 
+#if defined(SOUNDFILE)
+    if (data != nullptr && sizeInBytes >= 4)
+    {
+        juce::MemoryInputStream in(data, (size_t)sizeInBytes, false);
+        const int magic = in.readInt();
+        if (magic == 0x47505332) // GPS2 (path before Faust blob)
+        {
+            const int pathLen = in.readInt();
+            constexpr int kMaxPathBytes = 65536;
+            const auto consumedHeader = (int64_t)8;
+            if (pathLen >= 0 && pathLen <= kMaxPathBytes
+                && consumedHeader + (int64_t)pathLen + (int64_t)4 <= (int64_t)sizeInBytes)
+            {
+                juce::MemoryBlock pathBytes((size_t)pathLen);
+                in.read(pathBytes.getData(), (size_t)pathLen);
+                const juce::String samplePath =
+                    juce::String::fromUTF8((const char *)pathBytes.getData(), pathLen);
+                const int faustSize = in.readInt();
+                const auto afterHeader = consumedHeader + (int64_t)pathLen + (int64_t)4;
+                if (faustSize >= 0 && afterHeader + (int64_t)faustSize <= (int64_t)sizeInBytes)
+                {
+                    juce::MemoryBlock faustBlock;
+                    in.readIntoMemoryBlock(faustBlock, (size_t)faustSize);
+                    fStateUI.setStateInformation(faustBlock.getData(), (int)faustBlock.getSize());
+                    if (samplePath.isNotEmpty())
+                    {
+                        const juce::File f(samplePath);
+                        if (f.existsAsFile())
+                        {
+                            if (auto *su = getSoundUIBrowse())
+                            {
+                                const juce::ScopedLock audioLk(getCallbackLock());
+                                su->reloadFromAbsoluteFile(f);
+                            }
+                        }
+                    }
+                    if (auto *ed = getActiveEditor())
+                        if (auto *fed = dynamic_cast<FaustPlugInAudioProcessorEditor *>(ed))
+                            fed->refreshWaveformAfterExternalSampleChange();
+                    return;
+                }
+                if (samplePath.isNotEmpty())
+                {
+                    const juce::File f(samplePath);
+                    if (f.existsAsFile())
+                    {
+                        if (auto *su = getSoundUIBrowse())
+                        {
+                            const juce::ScopedLock audioLk(getCallbackLock());
+                            su->reloadFromAbsoluteFile(f);
+                        }
+                    }
+                    if (auto *ed = getActiveEditor())
+                        if (auto *fed = dynamic_cast<FaustPlugInAudioProcessorEditor *>(ed))
+                            fed->refreshWaveformAfterExternalSampleChange();
+                    return;
+                }
+            }
+        }
+        else if (magic == 0x47505331 && sizeInBytes >= 8) // GPS1 legacy
+        {
+            juce::MemoryInputStream in1(data, (size_t)sizeInBytes, false);
+            (void)in1.readInt(); // skip magic
+            const int faustSize = in1.readInt();
+            const auto payloadBytes = (int64_t)sizeInBytes - 8;
+            if (faustSize >= 0 && (int64_t)faustSize <= payloadBytes)
+            {
+                juce::MemoryBlock faustBlock;
+                in1.readIntoMemoryBlock(faustBlock, (size_t)faustSize);
+                fStateUI.setStateInformation(faustBlock.getData(), (int)faustBlock.getSize());
+                const juce::String samplePath = in1.readString();
+                if (samplePath.isNotEmpty())
+                {
+                    const juce::File f(samplePath);
+                    if (f.existsAsFile())
+                    {
+                        if (auto *su = getSoundUIBrowse())
+                        {
+                            const juce::ScopedLock audioLk(getCallbackLock());
+                            su->reloadFromAbsoluteFile(f);
+                        }
+                    }
+                }
+                if (auto *ed = getActiveEditor())
+                    if (auto *fed = dynamic_cast<FaustPlugInAudioProcessorEditor *>(ed))
+                        fed->refreshWaveformAfterExternalSampleChange();
+                return;
+            }
+        }
+        if (magic == 0x47505332 || magic == 0x47505331)
+            return;
+    }
+#endif
     fStateUI.setStateInformation(data, sizeInBytes);
 }
 #endif
@@ -1162,6 +1321,11 @@ void FaustPlugInAudioProcessorEditor::refreshWaveformDisplay()
     {
         fWaveform.clear();
     }
+}
+
+void FaustPlugInAudioProcessorEditor::refreshWaveformAfterExternalSampleChange()
+{
+    refreshWaveformDisplay();
 }
 
 bool FaustPlugInAudioProcessorEditor::isAudioExtension(const juce::String &extLower)
