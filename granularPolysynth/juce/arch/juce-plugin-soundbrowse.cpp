@@ -640,14 +640,31 @@ private:
     FaustPlugInAudioProcessor &processor;
 
 #if defined(SOUNDFILE)
-    void loadSampleFromFile(const juce::File &f);
+    void loadSampleFromFile(const juce::File &f, bool syncBrowseToLoadedPath = true);
     void refreshWaveformDisplay();
     static bool isAudioExtension(const juce::String &extLower);
 
+    void applyBrowseFolderFromEditor();
+    void rebuildBrowseFileList();
+    void syncBrowseIndexToCurrentFile();
+    void loadBrowseEntry(int index);
+    void loadAdjacentBrowseFile(int delta);
+    void loadRandomBrowseFile();
+    void updateBrowseNavButtonState();
+
     SampleWaveformStrip fWaveform;
+    juce::TextEditor fBrowseFolderPath;
+    juce::TextButton fBrowseFolderApply;
+    juce::TextButton fPrevAudioFile;
+    juce::TextButton fNextAudioFile;
+    juce::TextButton fRandomAudioFile;
     juce::TextButton fLoadSample;
     std::shared_ptr<juce::FileChooser> fFileChooser;
     bool fFileDragHover = false;
+
+    juce::File fBrowseFolderRoot;
+    std::vector<juce::File> fBrowseAudioFiles;
+    int fBrowseFileIndex = -1;
 #endif
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(FaustPlugInAudioProcessorEditor)
@@ -1200,7 +1217,28 @@ FaustPlugInAudioProcessorEditor::FaustPlugInAudioProcessorEditor(FaustPlugInAudi
 
 #if defined(SOUNDFILE)
     addAndMakeVisible(fWaveform);
+    addAndMakeVisible(fBrowseFolderPath);
+    addAndMakeVisible(fBrowseFolderApply);
+    addAndMakeVisible(fPrevAudioFile);
+    addAndMakeVisible(fNextAudioFile);
+    addAndMakeVisible(fRandomAudioFile);
     addAndMakeVisible(fLoadSample);
+
+    fBrowseFolderPath.setMultiLine(false);
+    fBrowseFolderPath.setReturnKeyStartsNewLine(false);
+    fBrowseFolderPath.setTextToShowWhenEmpty("Folder path (Set or Enter)", juce::Colours::grey);
+    fBrowseFolderPath.onReturnKey = [this] { applyBrowseFolderFromEditor(); };
+
+    fBrowseFolderApply.setButtonText("Set");
+    fBrowseFolderApply.onClick = [this] { applyBrowseFolderFromEditor(); };
+
+    fPrevAudioFile.setButtonText("<");
+    fPrevAudioFile.onClick = [this] { loadAdjacentBrowseFile(-1); };
+    fNextAudioFile.setButtonText(">");
+    fNextAudioFile.onClick = [this] { loadAdjacentBrowseFile(1); };
+    fRandomAudioFile.setButtonText("Random");
+    fRandomAudioFile.onClick = [this] { loadRandomBrowseFile(); };
+
     fLoadSample.setButtonText("Load…");
     if (auto *su = p.getSoundUIBrowse())
     {
@@ -1210,7 +1248,15 @@ FaustPlugInAudioProcessorEditor::FaustPlugInAudioProcessorEditor(FaustPlugInAudi
             if (safeThis != nullptr) {
                 safeThis->refreshWaveformDisplay();
             } });
+        const juce::File cur = su->getLastLoadedFile();
+        if (cur.existsAsFile())
+        {
+            fBrowseFolderRoot = cur.getParentDirectory();
+            fBrowseFolderPath.setText(fBrowseFolderRoot.getFullPathName());
+            rebuildBrowseFileList();
+        }
     }
+    updateBrowseNavButtonState();
     fLoadSample.onClick = [this]
     {
         juce::Component::SafePointer<FaustPlugInAudioProcessorEditor> safeThis(this);
@@ -1289,11 +1335,22 @@ void FaustPlugInAudioProcessorEditor::resized()
 {
 #if defined(SOUNDFILE)
     auto bounds = getLocalBounds();
-    const int toolbarH = 78;
+    const int toolbarH = 108;
     auto top = bounds.removeFromTop(toolbarH).reduced(5, 4);
-    const int btnW = 100;
-    fLoadSample.setBounds(top.removeFromRight(btnW).reduced(2, 10));
-    fWaveform.setBounds(top.reduced(4, 0));
+
+    auto row1 = top.removeFromTop(30);
+    fBrowseFolderApply.setBounds(row1.removeFromRight(52).reduced(2, 0));
+    fBrowseFolderPath.setBounds(row1.reduced(4, 0));
+
+    auto row2 = top;
+    const int navBtnW = 40;
+    fPrevAudioFile.setBounds(row2.removeFromLeft(navBtnW).reduced(2, 4));
+    fNextAudioFile.setBounds(row2.removeFromLeft(navBtnW).reduced(2, 4));
+    fRandomAudioFile.setBounds(row2.removeFromLeft(88).reduced(2, 4));
+    const int loadW = 96;
+    fLoadSample.setBounds(row2.removeFromRight(loadW).reduced(2, 4));
+    fWaveform.setBounds(row2.reduced(6, 0));
+
     fJuceGUI.setBounds(bounds);
 #else
     fJuceGUI.setBounds(getLocalBounds());
@@ -1301,7 +1358,7 @@ void FaustPlugInAudioProcessorEditor::resized()
 }
 
 #if defined(SOUNDFILE)
-void FaustPlugInAudioProcessorEditor::loadSampleFromFile(const juce::File &f)
+void FaustPlugInAudioProcessorEditor::loadSampleFromFile(const juce::File &f, bool syncBrowseToLoadedPath)
 {
     if (auto *su = processor.getSoundUIBrowse())
     {
@@ -1309,6 +1366,105 @@ void FaustPlugInAudioProcessorEditor::loadSampleFromFile(const juce::File &f)
         const juce::ScopedLock callbackLock(processor.getCallbackLock());
         su->reloadFromAbsoluteFile(f);
     }
+    if (syncBrowseToLoadedPath)
+        syncBrowseIndexToCurrentFile();
+    updateBrowseNavButtonState();
+}
+
+void FaustPlugInAudioProcessorEditor::applyBrowseFolderFromEditor()
+{
+    const juce::File dir(fBrowseFolderPath.getText().trim());
+    if (!dir.isDirectory())
+        return;
+    fBrowseFolderRoot = dir;
+    rebuildBrowseFileList();
+}
+
+void FaustPlugInAudioProcessorEditor::rebuildBrowseFileList()
+{
+    fBrowseAudioFiles.clear();
+    fBrowseFileIndex = -1;
+    if (!fBrowseFolderRoot.isDirectory())
+    {
+        updateBrowseNavButtonState();
+        return;
+    }
+
+    juce::Array<juce::File> hits;
+    fBrowseFolderRoot.findChildFiles(hits, juce::File::findFiles, false);
+    for (int i = 0; i < hits.size(); ++i)
+    {
+        const juce::File file(hits.getReference(i));
+        if (!file.existsAsFile())
+            continue;
+        const juce::String ext = file.getFileExtension().toLowerCase();
+        if (isAudioExtension(ext.substring(1)))
+            fBrowseAudioFiles.push_back(file);
+    }
+
+    std::sort(fBrowseAudioFiles.begin(), fBrowseAudioFiles.end(),
+              [](const juce::File &a, const juce::File &b)
+              { return a.getFileName().compareIgnoreCase(b.getFileName()) < 0; });
+
+    syncBrowseIndexToCurrentFile();
+    updateBrowseNavButtonState();
+}
+
+void FaustPlugInAudioProcessorEditor::syncBrowseIndexToCurrentFile()
+{
+    fBrowseFileIndex = -1;
+    if (auto *su = processor.getSoundUIBrowse())
+    {
+        const juce::File cur = su->getLastLoadedFile();
+        if (!cur.existsAsFile())
+            return;
+        for (int i = 0; i < (int)fBrowseAudioFiles.size(); ++i)
+        {
+            if (fBrowseAudioFiles[(size_t)i] == cur)
+            {
+                fBrowseFileIndex = i;
+                break;
+            }
+        }
+    }
+}
+
+void FaustPlugInAudioProcessorEditor::loadBrowseEntry(int index)
+{
+    const int n = (int)fBrowseAudioFiles.size();
+    if (n <= 0 || index < 0 || index >= n)
+        return;
+    // External samples are copied to Application Support; sync-by-path would miss the list entry.
+    loadSampleFromFile(fBrowseAudioFiles[(size_t)index], false);
+    fBrowseFileIndex = index;
+    updateBrowseNavButtonState();
+}
+
+void FaustPlugInAudioProcessorEditor::loadAdjacentBrowseFile(int delta)
+{
+    const int n = (int)fBrowseAudioFiles.size();
+    if (n <= 0)
+        return;
+    int idx = (fBrowseFileIndex >= 0) ? fBrowseFileIndex : 0;
+    idx = ((idx + delta) % n + n) % n;
+    loadBrowseEntry(idx);
+}
+
+void FaustPlugInAudioProcessorEditor::loadRandomBrowseFile()
+{
+    const int n = (int)fBrowseAudioFiles.size();
+    if (n <= 0)
+        return;
+    const int idx = juce::Random::getSystemRandom().nextInt(n);
+    loadBrowseEntry(idx);
+}
+
+void FaustPlugInAudioProcessorEditor::updateBrowseNavButtonState()
+{
+    const bool ok = !fBrowseAudioFiles.empty();
+    fPrevAudioFile.setEnabled(ok);
+    fNextAudioFile.setEnabled(ok);
+    fRandomAudioFile.setEnabled(ok);
 }
 
 void FaustPlugInAudioProcessorEditor::refreshWaveformDisplay()
