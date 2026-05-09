@@ -1,24 +1,21 @@
 # macOS
 .DS_Store
 
-# CMake/JUCE build output for basicFMPolysynth
-basicFMPolysynth/build/
-basicFMPolysynth/.cmake/
-basicFMPolysynth/CMakeUserPresets.json
+# --- CMake / JUCE (any project subfolder)
+**/build/
+**/build-*/
+**/.cmake/
+**/CMakeUserPresets.json
+**/*_artefacts/
 
-# CMake/JUCE build output for granularPolysynth
-granularPolysynth/build/
-granularPolysynth/build-cmake-test/
-granularPolysynth/.cmake/
-granularPolysynth/CMakeUserPresets.json
-granularPolysynth/granularPolysynth_artefacts/
-granularPolysynth/granularPolysynth.app/
+# Standalone/plugin .app bundles produced by JUCE builds
+**/*.app/
 
-# Faust-generated temporary and intermediate folders
-faust.*/
-granularPolysynth/faust.*/
+# --- Faust → JUCE / tooling (regenerated sources, temp dirs)
+**/FaustPluginProcessor.cpp
+**/faust.*/
 
-# Common generated project/intermediate files
+# --- CMake / codegen clutter (repo-wide)
 **/CMakeFiles/
 **/CMakeCache.txt
 **/cmake_install.cmake
