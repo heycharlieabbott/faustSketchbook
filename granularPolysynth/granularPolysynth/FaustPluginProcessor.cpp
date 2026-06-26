@@ -107453,6 +107453,23 @@ class SoundUI : public SoundUIInterface
 #endif
 /**************************  END  SoundUI.h **************************/
 
+/** Captures the Faust zone pointer for the start slider (JuceGUI writes zones, not host params). */
+class StartZoneFinder : public MapUI
+{
+public:
+    FAUSTFLOAT *fStartZone = nullptr;
+
+    void addHorizontalSlider(const char *label, FAUSTFLOAT *zone, FAUSTFLOAT init,
+                             FAUSTFLOAT min, FAUSTFLOAT max, FAUSTFLOAT step) override
+    {
+        // Grouped poly prefixes paths with "Polyphonic/Voices/", so match the "/start" suffix
+        // (won't collide with startInterpBlend / startMod* which don't end in "/start").
+        if (fStartZone == nullptr && MapUI::endsWith(buildPath(label), "/start"))
+            fStartZone = zone;
+        MapUI::addHorizontalSlider(label, zone, init, min, max, step);
+    }
+};
+
 namespace granularPolySynthSoundFileDetail
 {
 inline juce::File getSampleCacheDirectory()
@@ -107485,6 +107502,57 @@ inline juce::File resolveFileForGranularSampler(const juce::File &source, const 
     if (!source.copyFileTo(dest))
         return source;
 
+    return dest;
+}
+
+/** Peak-normalize audio to [-0.99, 0.99] and write a cached WAV for playback + waveform display. */
+inline juce::File normalizeAudioToCache(const juce::File &source)
+{
+    if (!source.existsAsFile())
+        return {};
+
+    juce::AudioFormatManager formatManager;
+    formatManager.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(source));
+    if (!reader || reader->lengthInSamples <= 0)
+        return {};
+
+    const int numSamples = (int)reader->lengthInSamples;
+    const int numChannels = (int)reader->numChannels;
+    juce::AudioBuffer<float> buffer(numChannels, numSamples);
+    reader->read(&buffer, 0, numSamples, 0, true, true);
+
+    float peak = 0.f;
+    for (int ch = 0; ch < numChannels; ++ch)
+        peak = juce::jmax(peak, buffer.getMagnitude(ch, 0, numSamples));
+
+    if (peak <= 1e-9f)
+        return source;
+
+    buffer.applyGain(0.99f / peak);
+
+    auto dir = getSampleCacheDirectory();
+    if (!dir.createDirectory())
+        return {};
+
+    const auto hash = juce::String::toHexString(juce::String(source.getFullPathName()).hashCode());
+    auto dest = dir.getChildFile(hash + "_normalized.wav");
+    if (dest.existsAsFile())
+        dest.deleteFile();
+
+    juce::WavAudioFormat wavFormat;
+    std::unique_ptr<juce::FileOutputStream> stream(dest.createOutputStream());
+    if (!stream)
+        return {};
+
+    std::unique_ptr<juce::AudioFormatWriter> writer(
+        wavFormat.createWriterFor(stream.get(), reader->sampleRate, (unsigned int)numChannels, 24, {}, 0));
+    if (!writer)
+        return {};
+
+    stream.release();
+    writer->writeFromAudioSampleBuffer(buffer, 0, numSamples);
+    writer->flush();
     return dest;
 }
 } // namespace granularPolySynthSoundFileDetail
@@ -107576,8 +107644,22 @@ public:
     {
         fPeaks.clear();
         fCaption.clear();
+        fHasStartMarker = false;
         repaint();
     }
+
+    void setStartMarker(float normalizedPos)
+    {
+        fStartMarker = juce::jlimit(0.f, 1.f, normalizedPos);
+        fHasStartMarker = true;
+        repaint();
+    }
+
+    // Invoked while clicking/dragging on the waveform with a normalized [0,1] position.
+    std::function<void(float)> onPositionChanged;
+
+    void mouseDown(const juce::MouseEvent &e) override { handlePositionFromMouse(e); }
+    void mouseDrag(const juce::MouseEvent &e) override { handlePositionFromMouse(e); }
 
     void rebuildFromFile(const juce::File &file, juce::String caption)
     {
@@ -107657,6 +107739,18 @@ public:
             g.drawLine((float)x, y1, (float)x, y2, 1.2f);
         }
 
+        if (fHasStartMarker)
+        {
+            const float x = fStartMarker * (float)denom;
+            const float top = 3.f;
+            const float bottom = (float)h - 19.f;
+            g.setColour(juce::Colour(0xffff8844));
+            g.drawLine(x, top, x, bottom, 2.f);
+            juce::Path markerHead;
+            markerHead.addTriangle(x - 4.f, top, x + 4.f, top, x, top + 7.f);
+            g.fillPath(markerHead);
+        }
+
         g.setColour(juce::Colours::white.withAlpha(0.7f));
         g.setFont((float)juce::jmin(12, juce::jmax(9, h / 6)));
         g.drawText(fCaption, getLocalBounds().removeFromBottom(16).reduced(8, 0),
@@ -107664,8 +107758,19 @@ public:
     }
 
 private:
+    void handlePositionFromMouse(const juce::MouseEvent &e)
+    {
+        const int denom = juce::jmax(1, getWidth() - 1);
+        const float pos = juce::jlimit(0.f, 1.f, (float)e.x / (float)denom);
+        setStartMarker(pos);
+        if (onPositionChanged)
+            onPositionChanged(pos);
+    }
+
     std::vector<std::pair<float, float>> fPeaks;
     juce::String fCaption;
+    bool fHasStartMarker = false;
+    float fStartMarker = 0.f;
 };
 #endif
 
@@ -109204,7 +109309,7 @@ class timed_dsp : public decorator_dsp {
 
 struct mydspSIG0 {
 	int iVec4[2];
-	int iRec13[2];
+	int iRec14[2];
 	int fSampleRate;
 	
 	int getNumInputsmydspSIG0() {
@@ -109216,21 +109321,21 @@ struct mydspSIG0 {
 	
 	void instanceInitmydspSIG0(int sample_rate) {
 		fSampleRate = sample_rate;
-		for (int l14 = 0; l14 < 2; l14 = l14 + 1) {
-			iVec4[l14] = 0;
-		}
 		for (int l15 = 0; l15 < 2; l15 = l15 + 1) {
-			iRec13[l15] = 0;
+			iVec4[l15] = 0;
+		}
+		for (int l16 = 0; l16 < 2; l16 = l16 + 1) {
+			iRec14[l16] = 0;
 		}
 	}
 	
 	void fillmydspSIG0(int count, float* table) {
 		for (int i1 = 0; i1 < count; i1 = i1 + 1) {
 			iVec4[0] = 1;
-			iRec13[0] = (iVec4[1] + iRec13[1]) % 65536;
-			table[i1] = std::sin(9.58738e-05f * static_cast<float>(iRec13[0]));
+			iRec14[0] = (iVec4[1] + iRec14[1]) % 65536;
+			table[i1] = std::sin(9.58738e-05f * static_cast<float>(iRec14[0]));
 			iVec4[1] = iVec4[0];
-			iRec13[1] = iRec13[0];
+			iRec14[1] = iRec14[0];
 		}
 	}
 
@@ -109263,185 +109368,183 @@ struct mydsp : public base_dsp {
 	FAUSTFLOAT fHslider6;
 	FAUSTFLOAT fHslider7;
 	FAUSTFLOAT fHslider8;
-	float fRec4[2];
-	int iVec3[67108864];
-	float fConst2;
+	float fRec3[2];
 	FAUSTFLOAT fHslider9;
 	FAUSTFLOAT fHslider10;
 	FAUSTFLOAT fHslider11;
-	FAUSTFLOAT fHslider12;
-	float fRec6[2];
 	float fRec5[2];
-	float fRec3[2];
-	FAUSTFLOAT fHslider13;
+	int iVec3[1048576];
+	FAUSTFLOAT fHslider12;
 	float fRec8[2];
-	FAUSTFLOAT fHslider14;
+	FAUSTFLOAT fHslider13;
 	float fRec9[2];
 	float fRec7[2];
-	FAUSTFLOAT fHslider15;
+	float fRec6[2];
+	float fRec4[2];
+	FAUSTFLOAT fHslider14;
 	float fRec10[2];
+	FAUSTFLOAT fHslider15;
+	float fRec11[2];
 	FAUSTFLOAT fHslider16;
 	FAUSTFLOAT fHslider17;
 	FAUSTFLOAT fHslider18;
 	FAUSTFLOAT fHslider19;
-	FAUSTFLOAT fHslider20;
-	float fRec14[2];
-	float fRec12[2];
-	float fRec11[2];
 	float fRec15[2];
-	float fRec17[2];
+	float fRec13[2];
+	float fRec12[2];
 	float fRec16[2];
-	float fRec19[2];
+	FAUSTFLOAT fHslider20;
 	float fRec18[2];
+	float fRec17[2];
+	float fRec19[2];
+	float fRec21[2];
 	float fRec20[2];
 	float fRec22[2];
-	float fRec21[2];
+	float fRec24[2];
 	float fRec23[2];
 	float fRec25[2];
-	float fRec24[2];
+	float fRec27[2];
 	float fRec26[2];
 	float fRec28[2];
-	float fRec27[2];
+	float fRec30[2];
 	float fRec29[2];
 	float fRec31[2];
-	float fRec30[2];
+	float fRec33[2];
 	float fRec32[2];
 	float fRec34[2];
-	float fRec33[2];
+	float fRec36[2];
 	float fRec35[2];
 	float fRec37[2];
-	float fRec36[2];
+	float fRec39[2];
 	float fRec38[2];
 	float fRec40[2];
-	float fRec39[2];
+	float fRec42[2];
 	float fRec41[2];
 	float fRec43[2];
-	float fRec42[2];
+	float fRec45[2];
 	float fRec44[2];
 	float fRec46[2];
-	float fRec45[2];
+	float fRec48[2];
 	float fRec47[2];
 	float fRec49[2];
-	float fRec48[2];
+	float fRec51[2];
 	float fRec50[2];
 	float fRec52[2];
-	float fRec51[2];
+	float fRec54[2];
 	float fRec53[2];
 	float fRec55[2];
-	float fRec54[2];
+	float fRec57[2];
 	float fRec56[2];
 	float fRec58[2];
-	float fRec57[2];
+	float fRec60[2];
 	float fRec59[2];
 	float fRec61[2];
-	float fRec60[2];
+	float fRec63[2];
 	float fRec62[2];
 	float fRec64[2];
-	float fRec63[2];
+	float fRec66[2];
 	float fRec65[2];
 	float fRec67[2];
-	float fRec66[2];
+	float fRec69[2];
 	float fRec68[2];
 	float fRec70[2];
-	float fRec69[2];
+	float fRec72[2];
 	float fRec71[2];
 	float fRec73[2];
-	float fRec72[2];
+	float fRec75[2];
 	float fRec74[2];
 	float fRec76[2];
-	float fRec75[2];
+	float fRec78[2];
 	float fRec77[2];
 	float fRec79[2];
-	float fRec78[2];
+	float fRec81[2];
 	float fRec80[2];
 	float fRec82[2];
-	float fRec81[2];
+	float fRec84[2];
 	float fRec83[2];
 	float fRec85[2];
-	float fRec84[2];
+	float fRec87[2];
 	float fRec86[2];
 	float fRec88[2];
-	float fRec87[2];
+	float fRec90[2];
 	float fRec89[2];
 	float fRec91[2];
-	float fRec90[2];
+	float fRec93[2];
 	float fRec92[2];
 	float fRec94[2];
-	float fRec93[2];
+	float fRec96[2];
 	float fRec95[2];
 	float fRec97[2];
-	float fRec96[2];
+	float fRec99[2];
 	float fRec98[2];
 	float fRec100[2];
-	float fRec99[2];
+	float fRec102[2];
 	float fRec101[2];
 	float fRec103[2];
-	float fRec102[2];
+	float fRec105[2];
 	float fRec104[2];
 	float fRec106[2];
-	float fRec105[2];
+	float fRec108[2];
 	float fRec107[2];
 	float fRec109[2];
-	float fRec108[2];
+	float fRec111[2];
 	float fRec110[2];
 	float fRec112[2];
-	float fRec111[2];
+	float fRec114[2];
 	float fRec113[2];
 	float fRec115[2];
-	float fRec114[2];
+	float fRec117[2];
 	float fRec116[2];
 	float fRec118[2];
-	float fRec117[2];
+	float fRec120[2];
 	float fRec119[2];
 	float fRec121[2];
-	float fRec120[2];
+	float fRec123[2];
 	float fRec122[2];
 	float fRec124[2];
-	float fRec123[2];
+	float fRec126[2];
 	float fRec125[2];
 	float fRec127[2];
-	float fRec126[2];
+	float fRec129[2];
 	float fRec128[2];
 	float fRec130[2];
-	float fRec129[2];
+	float fRec132[2];
 	float fRec131[2];
 	float fRec133[2];
-	float fRec132[2];
+	float fRec135[2];
 	float fRec134[2];
 	float fRec136[2];
-	float fRec135[2];
+	float fRec138[2];
 	float fRec137[2];
 	float fRec139[2];
-	float fRec138[2];
+	float fRec141[2];
 	float fRec140[2];
 	float fRec142[2];
-	float fRec141[2];
+	float fRec144[2];
 	float fRec143[2];
 	float fRec145[2];
-	float fRec144[2];
+	float fRec147[2];
 	float fRec146[2];
 	float fRec148[2];
-	float fRec147[2];
+	float fRec150[2];
 	float fRec149[2];
 	float fRec151[2];
-	float fRec150[2];
+	float fRec153[2];
 	float fRec152[2];
 	float fRec154[2];
-	float fRec153[2];
+	float fRec156[2];
 	float fRec155[2];
 	float fRec157[2];
-	float fRec156[2];
+	float fRec159[2];
 	float fRec158[2];
 	float fRec160[2];
-	float fRec159[2];
+	float fRec162[2];
 	float fRec161[2];
 	float fRec163[2];
-	float fRec162[2];
-	float fRec164[2];
 	float fVec5[2];
 	float fRec0[2];
 	float fVec6[2];
-	float fRec165[2];
+	float fRec164[2];
 	
 	void allocate() {
 		fSoundfile0 = 0;
@@ -109517,7 +109620,6 @@ struct mydsp : public base_dsp {
 		fSampleRate = sample_rate;
 		fConst0 = std::min<float>(1.92e+05f, std::max<float>(1.0f, static_cast<float>(fSampleRate)));
 		fConst1 = 1.0f / fConst0;
-		fConst2 = 0.02f * fConst0;
 	}
 	
 	virtual void instanceResetUserInterface() {
@@ -109531,20 +109633,20 @@ struct mydsp : public base_dsp {
 			fSoundfile0 = defaultsound;
 		}
 		fHslider5 = static_cast<FAUSTFLOAT>(1.0f);
-		fHslider6 = static_cast<FAUSTFLOAT>(4.0f);
-		fHslider7 = static_cast<FAUSTFLOAT>(8.0f);
-		fHslider8 = static_cast<FAUSTFLOAT>(1.0f);
-		fHslider9 = static_cast<FAUSTFLOAT>(1.0f);
-		fHslider10 = static_cast<FAUSTFLOAT>(1.0f);
-		fHslider11 = static_cast<FAUSTFLOAT>(69.0f);
-		fHslider12 = static_cast<FAUSTFLOAT>(4.4e+02f);
-		fHslider13 = static_cast<FAUSTFLOAT>(4096.0f);
-		fHslider14 = static_cast<FAUSTFLOAT>(1.0f);
-		fHslider15 = static_cast<FAUSTFLOAT>(0.0f);
-		fHslider16 = static_cast<FAUSTFLOAT>(0.05f);
-		fHslider17 = static_cast<FAUSTFLOAT>(0.0f);
-		fHslider18 = static_cast<FAUSTFLOAT>(1.0f);
-		fHslider19 = static_cast<FAUSTFLOAT>(0.1f);
+		fHslider6 = static_cast<FAUSTFLOAT>(1.0f);
+		fHslider7 = static_cast<FAUSTFLOAT>(69.0f);
+		fHslider8 = static_cast<FAUSTFLOAT>(4.4e+02f);
+		fHslider9 = static_cast<FAUSTFLOAT>(4.0f);
+		fHslider10 = static_cast<FAUSTFLOAT>(8.0f);
+		fHslider11 = static_cast<FAUSTFLOAT>(1.0f);
+		fHslider12 = static_cast<FAUSTFLOAT>(4096.0f);
+		fHslider13 = static_cast<FAUSTFLOAT>(1.0f);
+		fHslider14 = static_cast<FAUSTFLOAT>(0.0f);
+		fHslider15 = static_cast<FAUSTFLOAT>(0.05f);
+		fHslider16 = static_cast<FAUSTFLOAT>(0.0f);
+		fHslider17 = static_cast<FAUSTFLOAT>(1.0f);
+		fHslider18 = static_cast<FAUSTFLOAT>(0.1f);
+		fHslider19 = static_cast<FAUSTFLOAT>(1.0f);
 		fHslider20 = static_cast<FAUSTFLOAT>(1.0f);
 	}
 	
@@ -109566,502 +109668,499 @@ struct mydsp : public base_dsp {
 			fRec1[l4] = 0.0f;
 		}
 		for (int l5 = 0; l5 < 2; l5 = l5 + 1) {
-			fRec4[l5] = 0.0f;
+			fRec3[l5] = 0.0f;
 		}
-		for (int l6 = 0; l6 < 67108864; l6 = l6 + 1) {
-			iVec3[l6] = 0;
+		for (int l6 = 0; l6 < 2; l6 = l6 + 1) {
+			fRec5[l6] = 0.0f;
 		}
-		for (int l7 = 0; l7 < 2; l7 = l7 + 1) {
-			fRec6[l7] = 0.0f;
+		for (int l7 = 0; l7 < 1048576; l7 = l7 + 1) {
+			iVec3[l7] = 0;
 		}
 		for (int l8 = 0; l8 < 2; l8 = l8 + 1) {
-			fRec5[l8] = 0.0f;
+			fRec8[l8] = 0.0f;
 		}
 		for (int l9 = 0; l9 < 2; l9 = l9 + 1) {
-			fRec3[l9] = 0.0f;
+			fRec9[l9] = 0.0f;
 		}
 		for (int l10 = 0; l10 < 2; l10 = l10 + 1) {
-			fRec8[l10] = 0.0f;
+			fRec7[l10] = 0.0f;
 		}
 		for (int l11 = 0; l11 < 2; l11 = l11 + 1) {
-			fRec9[l11] = 0.0f;
+			fRec6[l11] = 0.0f;
 		}
 		for (int l12 = 0; l12 < 2; l12 = l12 + 1) {
-			fRec7[l12] = 0.0f;
+			fRec4[l12] = 0.0f;
 		}
 		for (int l13 = 0; l13 < 2; l13 = l13 + 1) {
 			fRec10[l13] = 0.0f;
 		}
-		for (int l16 = 0; l16 < 2; l16 = l16 + 1) {
-			fRec14[l16] = 0.0f;
+		for (int l14 = 0; l14 < 2; l14 = l14 + 1) {
+			fRec11[l14] = 0.0f;
 		}
 		for (int l17 = 0; l17 < 2; l17 = l17 + 1) {
-			fRec12[l17] = 0.0f;
+			fRec15[l17] = 0.0f;
 		}
 		for (int l18 = 0; l18 < 2; l18 = l18 + 1) {
-			fRec11[l18] = 0.0f;
+			fRec13[l18] = 0.0f;
 		}
 		for (int l19 = 0; l19 < 2; l19 = l19 + 1) {
-			fRec15[l19] = 0.0f;
+			fRec12[l19] = 0.0f;
 		}
 		for (int l20 = 0; l20 < 2; l20 = l20 + 1) {
-			fRec17[l20] = 0.0f;
+			fRec16[l20] = 0.0f;
 		}
 		for (int l21 = 0; l21 < 2; l21 = l21 + 1) {
-			fRec16[l21] = 0.0f;
+			fRec18[l21] = 0.0f;
 		}
 		for (int l22 = 0; l22 < 2; l22 = l22 + 1) {
-			fRec19[l22] = 0.0f;
+			fRec17[l22] = 0.0f;
 		}
 		for (int l23 = 0; l23 < 2; l23 = l23 + 1) {
-			fRec18[l23] = 0.0f;
+			fRec19[l23] = 0.0f;
 		}
 		for (int l24 = 0; l24 < 2; l24 = l24 + 1) {
-			fRec20[l24] = 0.0f;
+			fRec21[l24] = 0.0f;
 		}
 		for (int l25 = 0; l25 < 2; l25 = l25 + 1) {
-			fRec22[l25] = 0.0f;
+			fRec20[l25] = 0.0f;
 		}
 		for (int l26 = 0; l26 < 2; l26 = l26 + 1) {
-			fRec21[l26] = 0.0f;
+			fRec22[l26] = 0.0f;
 		}
 		for (int l27 = 0; l27 < 2; l27 = l27 + 1) {
-			fRec23[l27] = 0.0f;
+			fRec24[l27] = 0.0f;
 		}
 		for (int l28 = 0; l28 < 2; l28 = l28 + 1) {
-			fRec25[l28] = 0.0f;
+			fRec23[l28] = 0.0f;
 		}
 		for (int l29 = 0; l29 < 2; l29 = l29 + 1) {
-			fRec24[l29] = 0.0f;
+			fRec25[l29] = 0.0f;
 		}
 		for (int l30 = 0; l30 < 2; l30 = l30 + 1) {
-			fRec26[l30] = 0.0f;
+			fRec27[l30] = 0.0f;
 		}
 		for (int l31 = 0; l31 < 2; l31 = l31 + 1) {
-			fRec28[l31] = 0.0f;
+			fRec26[l31] = 0.0f;
 		}
 		for (int l32 = 0; l32 < 2; l32 = l32 + 1) {
-			fRec27[l32] = 0.0f;
+			fRec28[l32] = 0.0f;
 		}
 		for (int l33 = 0; l33 < 2; l33 = l33 + 1) {
-			fRec29[l33] = 0.0f;
+			fRec30[l33] = 0.0f;
 		}
 		for (int l34 = 0; l34 < 2; l34 = l34 + 1) {
-			fRec31[l34] = 0.0f;
+			fRec29[l34] = 0.0f;
 		}
 		for (int l35 = 0; l35 < 2; l35 = l35 + 1) {
-			fRec30[l35] = 0.0f;
+			fRec31[l35] = 0.0f;
 		}
 		for (int l36 = 0; l36 < 2; l36 = l36 + 1) {
-			fRec32[l36] = 0.0f;
+			fRec33[l36] = 0.0f;
 		}
 		for (int l37 = 0; l37 < 2; l37 = l37 + 1) {
-			fRec34[l37] = 0.0f;
+			fRec32[l37] = 0.0f;
 		}
 		for (int l38 = 0; l38 < 2; l38 = l38 + 1) {
-			fRec33[l38] = 0.0f;
+			fRec34[l38] = 0.0f;
 		}
 		for (int l39 = 0; l39 < 2; l39 = l39 + 1) {
-			fRec35[l39] = 0.0f;
+			fRec36[l39] = 0.0f;
 		}
 		for (int l40 = 0; l40 < 2; l40 = l40 + 1) {
-			fRec37[l40] = 0.0f;
+			fRec35[l40] = 0.0f;
 		}
 		for (int l41 = 0; l41 < 2; l41 = l41 + 1) {
-			fRec36[l41] = 0.0f;
+			fRec37[l41] = 0.0f;
 		}
 		for (int l42 = 0; l42 < 2; l42 = l42 + 1) {
-			fRec38[l42] = 0.0f;
+			fRec39[l42] = 0.0f;
 		}
 		for (int l43 = 0; l43 < 2; l43 = l43 + 1) {
-			fRec40[l43] = 0.0f;
+			fRec38[l43] = 0.0f;
 		}
 		for (int l44 = 0; l44 < 2; l44 = l44 + 1) {
-			fRec39[l44] = 0.0f;
+			fRec40[l44] = 0.0f;
 		}
 		for (int l45 = 0; l45 < 2; l45 = l45 + 1) {
-			fRec41[l45] = 0.0f;
+			fRec42[l45] = 0.0f;
 		}
 		for (int l46 = 0; l46 < 2; l46 = l46 + 1) {
-			fRec43[l46] = 0.0f;
+			fRec41[l46] = 0.0f;
 		}
 		for (int l47 = 0; l47 < 2; l47 = l47 + 1) {
-			fRec42[l47] = 0.0f;
+			fRec43[l47] = 0.0f;
 		}
 		for (int l48 = 0; l48 < 2; l48 = l48 + 1) {
-			fRec44[l48] = 0.0f;
+			fRec45[l48] = 0.0f;
 		}
 		for (int l49 = 0; l49 < 2; l49 = l49 + 1) {
-			fRec46[l49] = 0.0f;
+			fRec44[l49] = 0.0f;
 		}
 		for (int l50 = 0; l50 < 2; l50 = l50 + 1) {
-			fRec45[l50] = 0.0f;
+			fRec46[l50] = 0.0f;
 		}
 		for (int l51 = 0; l51 < 2; l51 = l51 + 1) {
-			fRec47[l51] = 0.0f;
+			fRec48[l51] = 0.0f;
 		}
 		for (int l52 = 0; l52 < 2; l52 = l52 + 1) {
-			fRec49[l52] = 0.0f;
+			fRec47[l52] = 0.0f;
 		}
 		for (int l53 = 0; l53 < 2; l53 = l53 + 1) {
-			fRec48[l53] = 0.0f;
+			fRec49[l53] = 0.0f;
 		}
 		for (int l54 = 0; l54 < 2; l54 = l54 + 1) {
-			fRec50[l54] = 0.0f;
+			fRec51[l54] = 0.0f;
 		}
 		for (int l55 = 0; l55 < 2; l55 = l55 + 1) {
-			fRec52[l55] = 0.0f;
+			fRec50[l55] = 0.0f;
 		}
 		for (int l56 = 0; l56 < 2; l56 = l56 + 1) {
-			fRec51[l56] = 0.0f;
+			fRec52[l56] = 0.0f;
 		}
 		for (int l57 = 0; l57 < 2; l57 = l57 + 1) {
-			fRec53[l57] = 0.0f;
+			fRec54[l57] = 0.0f;
 		}
 		for (int l58 = 0; l58 < 2; l58 = l58 + 1) {
-			fRec55[l58] = 0.0f;
+			fRec53[l58] = 0.0f;
 		}
 		for (int l59 = 0; l59 < 2; l59 = l59 + 1) {
-			fRec54[l59] = 0.0f;
+			fRec55[l59] = 0.0f;
 		}
 		for (int l60 = 0; l60 < 2; l60 = l60 + 1) {
-			fRec56[l60] = 0.0f;
+			fRec57[l60] = 0.0f;
 		}
 		for (int l61 = 0; l61 < 2; l61 = l61 + 1) {
-			fRec58[l61] = 0.0f;
+			fRec56[l61] = 0.0f;
 		}
 		for (int l62 = 0; l62 < 2; l62 = l62 + 1) {
-			fRec57[l62] = 0.0f;
+			fRec58[l62] = 0.0f;
 		}
 		for (int l63 = 0; l63 < 2; l63 = l63 + 1) {
-			fRec59[l63] = 0.0f;
+			fRec60[l63] = 0.0f;
 		}
 		for (int l64 = 0; l64 < 2; l64 = l64 + 1) {
-			fRec61[l64] = 0.0f;
+			fRec59[l64] = 0.0f;
 		}
 		for (int l65 = 0; l65 < 2; l65 = l65 + 1) {
-			fRec60[l65] = 0.0f;
+			fRec61[l65] = 0.0f;
 		}
 		for (int l66 = 0; l66 < 2; l66 = l66 + 1) {
-			fRec62[l66] = 0.0f;
+			fRec63[l66] = 0.0f;
 		}
 		for (int l67 = 0; l67 < 2; l67 = l67 + 1) {
-			fRec64[l67] = 0.0f;
+			fRec62[l67] = 0.0f;
 		}
 		for (int l68 = 0; l68 < 2; l68 = l68 + 1) {
-			fRec63[l68] = 0.0f;
+			fRec64[l68] = 0.0f;
 		}
 		for (int l69 = 0; l69 < 2; l69 = l69 + 1) {
-			fRec65[l69] = 0.0f;
+			fRec66[l69] = 0.0f;
 		}
 		for (int l70 = 0; l70 < 2; l70 = l70 + 1) {
-			fRec67[l70] = 0.0f;
+			fRec65[l70] = 0.0f;
 		}
 		for (int l71 = 0; l71 < 2; l71 = l71 + 1) {
-			fRec66[l71] = 0.0f;
+			fRec67[l71] = 0.0f;
 		}
 		for (int l72 = 0; l72 < 2; l72 = l72 + 1) {
-			fRec68[l72] = 0.0f;
+			fRec69[l72] = 0.0f;
 		}
 		for (int l73 = 0; l73 < 2; l73 = l73 + 1) {
-			fRec70[l73] = 0.0f;
+			fRec68[l73] = 0.0f;
 		}
 		for (int l74 = 0; l74 < 2; l74 = l74 + 1) {
-			fRec69[l74] = 0.0f;
+			fRec70[l74] = 0.0f;
 		}
 		for (int l75 = 0; l75 < 2; l75 = l75 + 1) {
-			fRec71[l75] = 0.0f;
+			fRec72[l75] = 0.0f;
 		}
 		for (int l76 = 0; l76 < 2; l76 = l76 + 1) {
-			fRec73[l76] = 0.0f;
+			fRec71[l76] = 0.0f;
 		}
 		for (int l77 = 0; l77 < 2; l77 = l77 + 1) {
-			fRec72[l77] = 0.0f;
+			fRec73[l77] = 0.0f;
 		}
 		for (int l78 = 0; l78 < 2; l78 = l78 + 1) {
-			fRec74[l78] = 0.0f;
+			fRec75[l78] = 0.0f;
 		}
 		for (int l79 = 0; l79 < 2; l79 = l79 + 1) {
-			fRec76[l79] = 0.0f;
+			fRec74[l79] = 0.0f;
 		}
 		for (int l80 = 0; l80 < 2; l80 = l80 + 1) {
-			fRec75[l80] = 0.0f;
+			fRec76[l80] = 0.0f;
 		}
 		for (int l81 = 0; l81 < 2; l81 = l81 + 1) {
-			fRec77[l81] = 0.0f;
+			fRec78[l81] = 0.0f;
 		}
 		for (int l82 = 0; l82 < 2; l82 = l82 + 1) {
-			fRec79[l82] = 0.0f;
+			fRec77[l82] = 0.0f;
 		}
 		for (int l83 = 0; l83 < 2; l83 = l83 + 1) {
-			fRec78[l83] = 0.0f;
+			fRec79[l83] = 0.0f;
 		}
 		for (int l84 = 0; l84 < 2; l84 = l84 + 1) {
-			fRec80[l84] = 0.0f;
+			fRec81[l84] = 0.0f;
 		}
 		for (int l85 = 0; l85 < 2; l85 = l85 + 1) {
-			fRec82[l85] = 0.0f;
+			fRec80[l85] = 0.0f;
 		}
 		for (int l86 = 0; l86 < 2; l86 = l86 + 1) {
-			fRec81[l86] = 0.0f;
+			fRec82[l86] = 0.0f;
 		}
 		for (int l87 = 0; l87 < 2; l87 = l87 + 1) {
-			fRec83[l87] = 0.0f;
+			fRec84[l87] = 0.0f;
 		}
 		for (int l88 = 0; l88 < 2; l88 = l88 + 1) {
-			fRec85[l88] = 0.0f;
+			fRec83[l88] = 0.0f;
 		}
 		for (int l89 = 0; l89 < 2; l89 = l89 + 1) {
-			fRec84[l89] = 0.0f;
+			fRec85[l89] = 0.0f;
 		}
 		for (int l90 = 0; l90 < 2; l90 = l90 + 1) {
-			fRec86[l90] = 0.0f;
+			fRec87[l90] = 0.0f;
 		}
 		for (int l91 = 0; l91 < 2; l91 = l91 + 1) {
-			fRec88[l91] = 0.0f;
+			fRec86[l91] = 0.0f;
 		}
 		for (int l92 = 0; l92 < 2; l92 = l92 + 1) {
-			fRec87[l92] = 0.0f;
+			fRec88[l92] = 0.0f;
 		}
 		for (int l93 = 0; l93 < 2; l93 = l93 + 1) {
-			fRec89[l93] = 0.0f;
+			fRec90[l93] = 0.0f;
 		}
 		for (int l94 = 0; l94 < 2; l94 = l94 + 1) {
-			fRec91[l94] = 0.0f;
+			fRec89[l94] = 0.0f;
 		}
 		for (int l95 = 0; l95 < 2; l95 = l95 + 1) {
-			fRec90[l95] = 0.0f;
+			fRec91[l95] = 0.0f;
 		}
 		for (int l96 = 0; l96 < 2; l96 = l96 + 1) {
-			fRec92[l96] = 0.0f;
+			fRec93[l96] = 0.0f;
 		}
 		for (int l97 = 0; l97 < 2; l97 = l97 + 1) {
-			fRec94[l97] = 0.0f;
+			fRec92[l97] = 0.0f;
 		}
 		for (int l98 = 0; l98 < 2; l98 = l98 + 1) {
-			fRec93[l98] = 0.0f;
+			fRec94[l98] = 0.0f;
 		}
 		for (int l99 = 0; l99 < 2; l99 = l99 + 1) {
-			fRec95[l99] = 0.0f;
+			fRec96[l99] = 0.0f;
 		}
 		for (int l100 = 0; l100 < 2; l100 = l100 + 1) {
-			fRec97[l100] = 0.0f;
+			fRec95[l100] = 0.0f;
 		}
 		for (int l101 = 0; l101 < 2; l101 = l101 + 1) {
-			fRec96[l101] = 0.0f;
+			fRec97[l101] = 0.0f;
 		}
 		for (int l102 = 0; l102 < 2; l102 = l102 + 1) {
-			fRec98[l102] = 0.0f;
+			fRec99[l102] = 0.0f;
 		}
 		for (int l103 = 0; l103 < 2; l103 = l103 + 1) {
-			fRec100[l103] = 0.0f;
+			fRec98[l103] = 0.0f;
 		}
 		for (int l104 = 0; l104 < 2; l104 = l104 + 1) {
-			fRec99[l104] = 0.0f;
+			fRec100[l104] = 0.0f;
 		}
 		for (int l105 = 0; l105 < 2; l105 = l105 + 1) {
-			fRec101[l105] = 0.0f;
+			fRec102[l105] = 0.0f;
 		}
 		for (int l106 = 0; l106 < 2; l106 = l106 + 1) {
-			fRec103[l106] = 0.0f;
+			fRec101[l106] = 0.0f;
 		}
 		for (int l107 = 0; l107 < 2; l107 = l107 + 1) {
-			fRec102[l107] = 0.0f;
+			fRec103[l107] = 0.0f;
 		}
 		for (int l108 = 0; l108 < 2; l108 = l108 + 1) {
-			fRec104[l108] = 0.0f;
+			fRec105[l108] = 0.0f;
 		}
 		for (int l109 = 0; l109 < 2; l109 = l109 + 1) {
-			fRec106[l109] = 0.0f;
+			fRec104[l109] = 0.0f;
 		}
 		for (int l110 = 0; l110 < 2; l110 = l110 + 1) {
-			fRec105[l110] = 0.0f;
+			fRec106[l110] = 0.0f;
 		}
 		for (int l111 = 0; l111 < 2; l111 = l111 + 1) {
-			fRec107[l111] = 0.0f;
+			fRec108[l111] = 0.0f;
 		}
 		for (int l112 = 0; l112 < 2; l112 = l112 + 1) {
-			fRec109[l112] = 0.0f;
+			fRec107[l112] = 0.0f;
 		}
 		for (int l113 = 0; l113 < 2; l113 = l113 + 1) {
-			fRec108[l113] = 0.0f;
+			fRec109[l113] = 0.0f;
 		}
 		for (int l114 = 0; l114 < 2; l114 = l114 + 1) {
-			fRec110[l114] = 0.0f;
+			fRec111[l114] = 0.0f;
 		}
 		for (int l115 = 0; l115 < 2; l115 = l115 + 1) {
-			fRec112[l115] = 0.0f;
+			fRec110[l115] = 0.0f;
 		}
 		for (int l116 = 0; l116 < 2; l116 = l116 + 1) {
-			fRec111[l116] = 0.0f;
+			fRec112[l116] = 0.0f;
 		}
 		for (int l117 = 0; l117 < 2; l117 = l117 + 1) {
-			fRec113[l117] = 0.0f;
+			fRec114[l117] = 0.0f;
 		}
 		for (int l118 = 0; l118 < 2; l118 = l118 + 1) {
-			fRec115[l118] = 0.0f;
+			fRec113[l118] = 0.0f;
 		}
 		for (int l119 = 0; l119 < 2; l119 = l119 + 1) {
-			fRec114[l119] = 0.0f;
+			fRec115[l119] = 0.0f;
 		}
 		for (int l120 = 0; l120 < 2; l120 = l120 + 1) {
-			fRec116[l120] = 0.0f;
+			fRec117[l120] = 0.0f;
 		}
 		for (int l121 = 0; l121 < 2; l121 = l121 + 1) {
-			fRec118[l121] = 0.0f;
+			fRec116[l121] = 0.0f;
 		}
 		for (int l122 = 0; l122 < 2; l122 = l122 + 1) {
-			fRec117[l122] = 0.0f;
+			fRec118[l122] = 0.0f;
 		}
 		for (int l123 = 0; l123 < 2; l123 = l123 + 1) {
-			fRec119[l123] = 0.0f;
+			fRec120[l123] = 0.0f;
 		}
 		for (int l124 = 0; l124 < 2; l124 = l124 + 1) {
-			fRec121[l124] = 0.0f;
+			fRec119[l124] = 0.0f;
 		}
 		for (int l125 = 0; l125 < 2; l125 = l125 + 1) {
-			fRec120[l125] = 0.0f;
+			fRec121[l125] = 0.0f;
 		}
 		for (int l126 = 0; l126 < 2; l126 = l126 + 1) {
-			fRec122[l126] = 0.0f;
+			fRec123[l126] = 0.0f;
 		}
 		for (int l127 = 0; l127 < 2; l127 = l127 + 1) {
-			fRec124[l127] = 0.0f;
+			fRec122[l127] = 0.0f;
 		}
 		for (int l128 = 0; l128 < 2; l128 = l128 + 1) {
-			fRec123[l128] = 0.0f;
+			fRec124[l128] = 0.0f;
 		}
 		for (int l129 = 0; l129 < 2; l129 = l129 + 1) {
-			fRec125[l129] = 0.0f;
+			fRec126[l129] = 0.0f;
 		}
 		for (int l130 = 0; l130 < 2; l130 = l130 + 1) {
-			fRec127[l130] = 0.0f;
+			fRec125[l130] = 0.0f;
 		}
 		for (int l131 = 0; l131 < 2; l131 = l131 + 1) {
-			fRec126[l131] = 0.0f;
+			fRec127[l131] = 0.0f;
 		}
 		for (int l132 = 0; l132 < 2; l132 = l132 + 1) {
-			fRec128[l132] = 0.0f;
+			fRec129[l132] = 0.0f;
 		}
 		for (int l133 = 0; l133 < 2; l133 = l133 + 1) {
-			fRec130[l133] = 0.0f;
+			fRec128[l133] = 0.0f;
 		}
 		for (int l134 = 0; l134 < 2; l134 = l134 + 1) {
-			fRec129[l134] = 0.0f;
+			fRec130[l134] = 0.0f;
 		}
 		for (int l135 = 0; l135 < 2; l135 = l135 + 1) {
-			fRec131[l135] = 0.0f;
+			fRec132[l135] = 0.0f;
 		}
 		for (int l136 = 0; l136 < 2; l136 = l136 + 1) {
-			fRec133[l136] = 0.0f;
+			fRec131[l136] = 0.0f;
 		}
 		for (int l137 = 0; l137 < 2; l137 = l137 + 1) {
-			fRec132[l137] = 0.0f;
+			fRec133[l137] = 0.0f;
 		}
 		for (int l138 = 0; l138 < 2; l138 = l138 + 1) {
-			fRec134[l138] = 0.0f;
+			fRec135[l138] = 0.0f;
 		}
 		for (int l139 = 0; l139 < 2; l139 = l139 + 1) {
-			fRec136[l139] = 0.0f;
+			fRec134[l139] = 0.0f;
 		}
 		for (int l140 = 0; l140 < 2; l140 = l140 + 1) {
-			fRec135[l140] = 0.0f;
+			fRec136[l140] = 0.0f;
 		}
 		for (int l141 = 0; l141 < 2; l141 = l141 + 1) {
-			fRec137[l141] = 0.0f;
+			fRec138[l141] = 0.0f;
 		}
 		for (int l142 = 0; l142 < 2; l142 = l142 + 1) {
-			fRec139[l142] = 0.0f;
+			fRec137[l142] = 0.0f;
 		}
 		for (int l143 = 0; l143 < 2; l143 = l143 + 1) {
-			fRec138[l143] = 0.0f;
+			fRec139[l143] = 0.0f;
 		}
 		for (int l144 = 0; l144 < 2; l144 = l144 + 1) {
-			fRec140[l144] = 0.0f;
+			fRec141[l144] = 0.0f;
 		}
 		for (int l145 = 0; l145 < 2; l145 = l145 + 1) {
-			fRec142[l145] = 0.0f;
+			fRec140[l145] = 0.0f;
 		}
 		for (int l146 = 0; l146 < 2; l146 = l146 + 1) {
-			fRec141[l146] = 0.0f;
+			fRec142[l146] = 0.0f;
 		}
 		for (int l147 = 0; l147 < 2; l147 = l147 + 1) {
-			fRec143[l147] = 0.0f;
+			fRec144[l147] = 0.0f;
 		}
 		for (int l148 = 0; l148 < 2; l148 = l148 + 1) {
-			fRec145[l148] = 0.0f;
+			fRec143[l148] = 0.0f;
 		}
 		for (int l149 = 0; l149 < 2; l149 = l149 + 1) {
-			fRec144[l149] = 0.0f;
+			fRec145[l149] = 0.0f;
 		}
 		for (int l150 = 0; l150 < 2; l150 = l150 + 1) {
-			fRec146[l150] = 0.0f;
+			fRec147[l150] = 0.0f;
 		}
 		for (int l151 = 0; l151 < 2; l151 = l151 + 1) {
-			fRec148[l151] = 0.0f;
+			fRec146[l151] = 0.0f;
 		}
 		for (int l152 = 0; l152 < 2; l152 = l152 + 1) {
-			fRec147[l152] = 0.0f;
+			fRec148[l152] = 0.0f;
 		}
 		for (int l153 = 0; l153 < 2; l153 = l153 + 1) {
-			fRec149[l153] = 0.0f;
+			fRec150[l153] = 0.0f;
 		}
 		for (int l154 = 0; l154 < 2; l154 = l154 + 1) {
-			fRec151[l154] = 0.0f;
+			fRec149[l154] = 0.0f;
 		}
 		for (int l155 = 0; l155 < 2; l155 = l155 + 1) {
-			fRec150[l155] = 0.0f;
+			fRec151[l155] = 0.0f;
 		}
 		for (int l156 = 0; l156 < 2; l156 = l156 + 1) {
-			fRec152[l156] = 0.0f;
+			fRec153[l156] = 0.0f;
 		}
 		for (int l157 = 0; l157 < 2; l157 = l157 + 1) {
-			fRec154[l157] = 0.0f;
+			fRec152[l157] = 0.0f;
 		}
 		for (int l158 = 0; l158 < 2; l158 = l158 + 1) {
-			fRec153[l158] = 0.0f;
+			fRec154[l158] = 0.0f;
 		}
 		for (int l159 = 0; l159 < 2; l159 = l159 + 1) {
-			fRec155[l159] = 0.0f;
+			fRec156[l159] = 0.0f;
 		}
 		for (int l160 = 0; l160 < 2; l160 = l160 + 1) {
-			fRec157[l160] = 0.0f;
+			fRec155[l160] = 0.0f;
 		}
 		for (int l161 = 0; l161 < 2; l161 = l161 + 1) {
-			fRec156[l161] = 0.0f;
+			fRec157[l161] = 0.0f;
 		}
 		for (int l162 = 0; l162 < 2; l162 = l162 + 1) {
-			fRec158[l162] = 0.0f;
+			fRec159[l162] = 0.0f;
 		}
 		for (int l163 = 0; l163 < 2; l163 = l163 + 1) {
-			fRec160[l163] = 0.0f;
+			fRec158[l163] = 0.0f;
 		}
 		for (int l164 = 0; l164 < 2; l164 = l164 + 1) {
-			fRec159[l164] = 0.0f;
+			fRec160[l164] = 0.0f;
 		}
 		for (int l165 = 0; l165 < 2; l165 = l165 + 1) {
-			fRec161[l165] = 0.0f;
+			fRec162[l165] = 0.0f;
 		}
 		for (int l166 = 0; l166 < 2; l166 = l166 + 1) {
-			fRec163[l166] = 0.0f;
+			fRec161[l166] = 0.0f;
 		}
 		for (int l167 = 0; l167 < 2; l167 = l167 + 1) {
-			fRec162[l167] = 0.0f;
+			fRec163[l167] = 0.0f;
 		}
 		for (int l168 = 0; l168 < 2; l168 = l168 + 1) {
-			fRec164[l168] = 0.0f;
+			fVec5[l168] = 0.0f;
 		}
 		for (int l169 = 0; l169 < 2; l169 = l169 + 1) {
-			fVec5[l169] = 0.0f;
+			fRec0[l169] = 0.0f;
 		}
 		for (int l170 = 0; l170 < 2; l170 = l170 + 1) {
-			fRec0[l170] = 0.0f;
+			fVec6[l170] = 0.0f;
 		}
 		for (int l171 = 0; l171 < 2; l171 = l171 + 1) {
-			fVec6[l171] = 0.0f;
-		}
-		for (int l172 = 0; l172 < 2; l172 = l172 + 1) {
-			fRec165[l172] = 0.0f;
+			fRec164[l171] = 0.0f;
 		}
 	}
 	
@@ -110086,29 +110185,30 @@ struct mydsp : public base_dsp {
 	
 	virtual void buildUserInterface(UI* ui_interface) {
 		ui_interface->openVerticalBox("Granular poly sampler");
+		ui_interface->openHorizontalBox("Granular");
 		ui_interface->openVerticalBox("A");
-		ui_interface->addHorizontalSlider("clockVoices", &fHslider6, FAUSTFLOAT(4.0f), FAUSTFLOAT(1.0f), FAUSTFLOAT(5e+01f), FAUSTFLOAT(1.0f));
-		ui_interface->addHorizontalSlider("dispersal", &fHslider5, FAUSTFLOAT(1.0f), FAUSTFLOAT(1.0f), FAUSTFLOAT(5e+01f), FAUSTFLOAT(1.0f));
-		ui_interface->declare(&fHslider7, "unit", "Hz");
-		ui_interface->addHorizontalSlider("grainDensity", &fHslider7, FAUSTFLOAT(8.0f), FAUSTFLOAT(0.1f), FAUSTFLOAT(8e+02f), FAUSTFLOAT(0.01f));
-		ui_interface->addHorizontalSlider("grainDensityMultiplier", &fHslider8, FAUSTFLOAT(1.0f), FAUSTFLOAT(0.1f), FAUSTFLOAT(1.0f), FAUSTFLOAT(0.01f));
-		ui_interface->addHorizontalSlider("grainLength", &fHslider13, FAUSTFLOAT(4096.0f), FAUSTFLOAT(1.0f), FAUSTFLOAT(1.2e+05f), FAUSTFLOAT(1.0f));
-		ui_interface->addHorizontalSlider("grainLengthMultiplier", &fHslider14, FAUSTFLOAT(1.0f), FAUSTFLOAT(0.1f), FAUSTFLOAT(1e+01f), FAUSTFLOAT(0.01f));
-		ui_interface->addHorizontalSlider("grainSpeed", &fHslider9, FAUSTFLOAT(1.0f), FAUSTFLOAT(0.03f), FAUSTFLOAT(5e+01f), FAUSTFLOAT(0.001f));
-		ui_interface->addHorizontalSlider("grainSpeedMultiplier", &fHslider10, FAUSTFLOAT(1.0f), FAUSTFLOAT(0.1f), FAUSTFLOAT(1e+01f), FAUSTFLOAT(0.01f));
-		ui_interface->addHorizontalSlider("start", &fHslider16, FAUSTFLOAT(0.05f), FAUSTFLOAT(0.0f), FAUSTFLOAT(1.0f), FAUSTFLOAT(0.001f));
-		ui_interface->addHorizontalSlider("startInterpBlend", &fHslider15, FAUSTFLOAT(0.0f), FAUSTFLOAT(0.0f), FAUSTFLOAT(1.0f), FAUSTFLOAT(0.001f));
-		ui_interface->addHorizontalSlider("startModAmp", &fHslider17, FAUSTFLOAT(0.0f), FAUSTFLOAT(0.0f), FAUSTFLOAT(0.5f), FAUSTFLOAT(0.001f));
-		ui_interface->addHorizontalSlider("startModAmpMultiplier", &fHslider18, FAUSTFLOAT(1.0f), FAUSTFLOAT(0.1f), FAUSTFLOAT(1e+01f), FAUSTFLOAT(0.01f));
-		ui_interface->declare(&fHslider19, "unit", "Hz");
-		ui_interface->addHorizontalSlider("startModFreq", &fHslider19, FAUSTFLOAT(0.1f), FAUSTFLOAT(0.001f), FAUSTFLOAT(12.0f), FAUSTFLOAT(0.001f));
-		ui_interface->addHorizontalSlider("startModFreqMultiplier", &fHslider20, FAUSTFLOAT(1.0f), FAUSTFLOAT(0.1f), FAUSTFLOAT(1e+01f), FAUSTFLOAT(0.01f));
+		ui_interface->addHorizontalSlider("clockVoices", &fHslider9, FAUSTFLOAT(4.0f), FAUSTFLOAT(1.0f), FAUSTFLOAT(5e+01f), FAUSTFLOAT(1.0f));
+		ui_interface->addHorizontalSlider("dispersal", &fHslider20, FAUSTFLOAT(1.0f), FAUSTFLOAT(1.0f), FAUSTFLOAT(5e+01f), FAUSTFLOAT(1.0f));
+		ui_interface->declare(&fHslider10, "unit", "Hz");
+		ui_interface->addHorizontalSlider("grainDensity", &fHslider10, FAUSTFLOAT(8.0f), FAUSTFLOAT(0.5f), FAUSTFLOAT(1e+01f), FAUSTFLOAT(0.01f));
+		ui_interface->addHorizontalSlider("grainDensityMultiplier", &fHslider11, FAUSTFLOAT(1.0f), FAUSTFLOAT(0.5f), FAUSTFLOAT(1.0f), FAUSTFLOAT(0.01f));
+		ui_interface->addHorizontalSlider("grainLength", &fHslider12, FAUSTFLOAT(4096.0f), FAUSTFLOAT(1.0f), FAUSTFLOAT(1.2e+05f), FAUSTFLOAT(1.0f));
+		ui_interface->addHorizontalSlider("grainLengthMultiplier", &fHslider13, FAUSTFLOAT(1.0f), FAUSTFLOAT(0.1f), FAUSTFLOAT(1e+01f), FAUSTFLOAT(0.01f));
+		ui_interface->addHorizontalSlider("grainSpeed", &fHslider5, FAUSTFLOAT(1.0f), FAUSTFLOAT(0.03f), FAUSTFLOAT(5e+01f), FAUSTFLOAT(0.001f));
+		ui_interface->addHorizontalSlider("grainSpeedMultiplier", &fHslider6, FAUSTFLOAT(1.0f), FAUSTFLOAT(0.1f), FAUSTFLOAT(1e+01f), FAUSTFLOAT(0.01f));
+		ui_interface->addHorizontalSlider("start", &fHslider15, FAUSTFLOAT(0.05f), FAUSTFLOAT(0.0f), FAUSTFLOAT(1.0f), FAUSTFLOAT(0.001f));
+		ui_interface->addHorizontalSlider("startInterpBlend", &fHslider14, FAUSTFLOAT(0.0f), FAUSTFLOAT(0.0f), FAUSTFLOAT(1.0f), FAUSTFLOAT(0.001f));
+		ui_interface->addHorizontalSlider("startModAmp", &fHslider16, FAUSTFLOAT(0.0f), FAUSTFLOAT(0.0f), FAUSTFLOAT(0.5f), FAUSTFLOAT(0.001f));
+		ui_interface->addHorizontalSlider("startModAmpMultiplier", &fHslider17, FAUSTFLOAT(1.0f), FAUSTFLOAT(0.1f), FAUSTFLOAT(1e+01f), FAUSTFLOAT(0.01f));
+		ui_interface->declare(&fHslider18, "unit", "Hz");
+		ui_interface->addHorizontalSlider("startModFreq", &fHslider18, FAUSTFLOAT(0.1f), FAUSTFLOAT(0.001f), FAUSTFLOAT(12.0f), FAUSTFLOAT(0.001f));
+		ui_interface->addHorizontalSlider("startModFreqMultiplier", &fHslider19, FAUSTFLOAT(1.0f), FAUSTFLOAT(0.1f), FAUSTFLOAT(1e+01f), FAUSTFLOAT(0.01f));
 		ui_interface->closeBox();
 		ui_interface->openVerticalBox("B");
-		ui_interface->addHorizontalSlider("baseKey", &fHslider11, FAUSTFLOAT(69.0f), FAUSTFLOAT(2e+01f), FAUSTFLOAT(1.3e+02f), FAUSTFLOAT(0.1f));
-		ui_interface->declare(&fHslider12, "midi", "keyon");
-		ui_interface->declare(&fHslider12, "unit", "Hz");
-		ui_interface->addHorizontalSlider("freq", &fHslider12, FAUSTFLOAT(4.4e+02f), FAUSTFLOAT(16.0f), FAUSTFLOAT(2e+04f), FAUSTFLOAT(0.01f));
+		ui_interface->addHorizontalSlider("baseKey", &fHslider7, FAUSTFLOAT(69.0f), FAUSTFLOAT(2e+01f), FAUSTFLOAT(1.3e+02f), FAUSTFLOAT(0.1f));
+		ui_interface->declare(&fHslider8, "midi", "keyon");
+		ui_interface->declare(&fHslider8, "unit", "Hz");
+		ui_interface->addHorizontalSlider("freq", &fHslider8, FAUSTFLOAT(4.4e+02f), FAUSTFLOAT(16.0f), FAUSTFLOAT(2e+04f), FAUSTFLOAT(0.01f));
 		ui_interface->closeBox();
 		ui_interface->openVerticalBox("C");
 		ui_interface->declare(&fHslider2, "unit", "s");
@@ -110119,6 +110219,7 @@ struct mydsp : public base_dsp {
 		ui_interface->declare(&fHslider1, "unit", "s");
 		ui_interface->addHorizontalSlider("release", &fHslider1, FAUSTFLOAT(0.35f), FAUSTFLOAT(0.02f), FAUSTFLOAT(12.0f), FAUSTFLOAT(0.01f));
 		ui_interface->addHorizontalSlider("sustain", &fHslider4, FAUSTFLOAT(0.85f), FAUSTFLOAT(0.0f), FAUSTFLOAT(1.0f), FAUSTFLOAT(0.01f));
+		ui_interface->closeBox();
 		ui_interface->closeBox();
 		ui_interface->addButton("gate", &fButton0);
 		ui_interface->addSoundfile("granularSample", "{'placeholder.wav'}", &fSoundfile0);
@@ -110142,321 +110243,321 @@ struct mydsp : public base_dsp {
 		int iSlow9 = fSoundfile0ca_le0[0];
 		float fSlow10 = static_cast<float>(iSlow9);
 		float fSlow11 = std::max<float>(127.0f, fSlow10);
-		int iSlow12 = static_cast<int>(static_cast<float>(fHslider6));
-		int iSlow13 = static_cast<int>(static_cast<float>(fHslider5) / static_cast<float>(iSlow12));
-		float fSlow14 = static_cast<float>(iSlow13 < iSlow12);
-		float fSlow15 = std::max<float>(0.01f, std::max<float>(0.01f, static_cast<float>(fHslider7)) * static_cast<float>(fHslider8));
-		float fSlow16 = fConst1 * fSlow15;
-		float fSlow17 = std::max<float>(1e-09f, fSlow15);
-		int iSlow18 = static_cast<int>(fConst2 * (static_cast<float>(iSlow13) / fSlow17));
-		float fSlow19 = 0.0022727272f * (std::max<float>(0.0001f, std::max<float>(0.0001f, static_cast<float>(fHslider9)) * static_cast<float>(fHslider10)) / std::pow(2.0f, 0.083333336f * (static_cast<float>(fHslider11) + -69.0f)));
-		float fSlow20 = static_cast<float>(fHslider12);
-		int iSlow21 = fSlow1 == 0.0f;
+		float fSlow12 = std::max<float>(0.0001f, std::max<float>(0.0001f, static_cast<float>(fHslider5)) * static_cast<float>(fHslider6));
+		float fSlow13 = 0.0022727272f / (fSlow12 * std::pow(2.0f, 0.083333336f * (static_cast<float>(fHslider7) + -69.0f)));
+		float fSlow14 = static_cast<float>(fHslider8);
+		int iSlow15 = fSlow1 == 0.0f;
+		int iSlow16 = static_cast<int>(static_cast<float>(fHslider9));
+		float fSlow17 = static_cast<float>(0 < iSlow16);
+		float fSlow18 = std::max<float>(0.01f, std::max<float>(0.01f, static_cast<float>(fHslider10)) * static_cast<float>(fHslider11));
+		float fSlow19 = fConst1 * fSlow18;
+		float fSlow20 = 1.0f / fSlow12;
+		float fSlow21 = 0.001f * static_cast<float>(fHslider12);
 		float fSlow22 = 0.001f * static_cast<float>(fHslider13);
-		float fSlow23 = 0.001f * static_cast<float>(fHslider14);
-		float fSlow24 = std::max<float>(127.0f, fSlow10 + -16.0f);
+		float fSlow23 = std::max<float>(127.0f, fSlow10 + -16.0f);
+		float fSlow24 = 0.001f * static_cast<float>(fHslider14);
 		float fSlow25 = 0.001f * static_cast<float>(fHslider15);
-		float fSlow26 = static_cast<float>(fHslider16);
-		float fSlow27 = static_cast<float>(fHslider17) * static_cast<float>(fHslider18);
-		float fSlow28 = 0.001f * fSlow27;
-		float fSlow29 = fConst1 * std::max<float>(0.0001f, static_cast<float>(fHslider19) * static_cast<float>(fHslider20));
-		float fSlow30 = 0.001f * fSlow26;
-		float fSlow31 = static_cast<float>(iSlow9 + -1);
+		float fSlow26 = static_cast<float>(fHslider16) * static_cast<float>(fHslider17);
+		float fSlow27 = 0.001f * fSlow26;
+		float fSlow28 = fConst1 * std::max<float>(0.0001f, static_cast<float>(fHslider18) * static_cast<float>(fHslider19));
+		float fSlow29 = static_cast<float>(iSlow9 + -1);
 		int* fSoundfile0ca_of0 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu0 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch0 = fSoundfile0ca_bu0[0];
-		float fSlow32 = 0.08f * fSlow26;
-		int iSlow33 = iSlow13 + 1;
-		float fSlow34 = static_cast<float>(iSlow33 < iSlow12);
-		int iSlow35 = static_cast<int>(fConst2 * (static_cast<float>(iSlow33) / fSlow17));
+		float fSlow30 = static_cast<float>(1 < iSlow16);
+		int iSlow31 = static_cast<int>(static_cast<float>(fHslider20) / static_cast<float>(iSlow16)) + 1;
+		float fSlow32 = static_cast<float>(std::max<int>(1, iSlow16));
+		float fSlow33 = static_cast<float>(iSlow31) / fSlow32;
+		float fSlow34 = std::max<float>(1e-09f, fSlow18);
+		int iSlow35 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow33 - std::floor(fSlow33))) / fSlow34));
 		int* fSoundfile0ca_of1 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu1 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch1 = fSoundfile0ca_bu1[0];
-		int iSlow36 = iSlow13 + 2;
-		float fSlow37 = static_cast<float>(iSlow36 < iSlow12);
-		int iSlow38 = static_cast<int>(fConst2 * (static_cast<float>(iSlow36) / fSlow17));
+		float fSlow36 = static_cast<float>(2 < iSlow16);
+		float fSlow37 = static_cast<float>(2 * iSlow31) / fSlow32;
+		int iSlow38 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow37 - std::floor(fSlow37))) / fSlow34));
 		int* fSoundfile0ca_of2 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu2 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch2 = fSoundfile0ca_bu2[0];
-		int iSlow39 = iSlow13 + 3;
-		float fSlow40 = static_cast<float>(iSlow39 < iSlow12);
-		int iSlow41 = static_cast<int>(fConst2 * (static_cast<float>(iSlow39) / fSlow17));
+		float fSlow39 = static_cast<float>(3 < iSlow16);
+		float fSlow40 = static_cast<float>(3 * iSlow31) / fSlow32;
+		int iSlow41 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow40 - std::floor(fSlow40))) / fSlow34));
 		int* fSoundfile0ca_of3 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu3 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch3 = fSoundfile0ca_bu3[0];
-		int iSlow42 = iSlow13 + 4;
-		float fSlow43 = static_cast<float>(iSlow42 < iSlow12);
-		int iSlow44 = static_cast<int>(fConst2 * (static_cast<float>(iSlow42) / fSlow17));
+		float fSlow42 = static_cast<float>(4 < iSlow16);
+		float fSlow43 = static_cast<float>(4 * iSlow31) / fSlow32;
+		int iSlow44 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow43 - std::floor(fSlow43))) / fSlow34));
 		int* fSoundfile0ca_of4 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu4 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch4 = fSoundfile0ca_bu4[0];
-		int iSlow45 = iSlow13 + 5;
-		float fSlow46 = static_cast<float>(iSlow45 < iSlow12);
-		int iSlow47 = static_cast<int>(fConst2 * (static_cast<float>(iSlow45) / fSlow17));
+		float fSlow45 = static_cast<float>(5 < iSlow16);
+		float fSlow46 = static_cast<float>(5 * iSlow31) / fSlow32;
+		int iSlow47 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow46 - std::floor(fSlow46))) / fSlow34));
 		int* fSoundfile0ca_of5 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu5 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch5 = fSoundfile0ca_bu5[0];
-		int iSlow48 = iSlow13 + 6;
-		float fSlow49 = static_cast<float>(iSlow48 < iSlow12);
-		int iSlow50 = static_cast<int>(fConst2 * (static_cast<float>(iSlow48) / fSlow17));
+		float fSlow48 = static_cast<float>(6 < iSlow16);
+		float fSlow49 = static_cast<float>(6 * iSlow31) / fSlow32;
+		int iSlow50 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow49 - std::floor(fSlow49))) / fSlow34));
 		int* fSoundfile0ca_of6 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu6 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch6 = fSoundfile0ca_bu6[0];
-		int iSlow51 = iSlow13 + 7;
-		float fSlow52 = static_cast<float>(iSlow51 < iSlow12);
-		int iSlow53 = static_cast<int>(fConst2 * (static_cast<float>(iSlow51) / fSlow17));
+		float fSlow51 = static_cast<float>(7 < iSlow16);
+		float fSlow52 = static_cast<float>(7 * iSlow31) / fSlow32;
+		int iSlow53 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow52 - std::floor(fSlow52))) / fSlow34));
 		int* fSoundfile0ca_of7 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu7 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch7 = fSoundfile0ca_bu7[0];
-		int iSlow54 = iSlow13 + 8;
-		float fSlow55 = static_cast<float>(iSlow54 < iSlow12);
-		int iSlow56 = static_cast<int>(fConst2 * (static_cast<float>(iSlow54) / fSlow17));
+		float fSlow54 = static_cast<float>(8 < iSlow16);
+		float fSlow55 = static_cast<float>(8 * iSlow31) / fSlow32;
+		int iSlow56 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow55 - std::floor(fSlow55))) / fSlow34));
 		int* fSoundfile0ca_of8 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu8 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch8 = fSoundfile0ca_bu8[0];
-		int iSlow57 = iSlow13 + 9;
-		float fSlow58 = static_cast<float>(iSlow57 < iSlow12);
-		int iSlow59 = static_cast<int>(fConst2 * (static_cast<float>(iSlow57) / fSlow17));
+		float fSlow57 = static_cast<float>(9 < iSlow16);
+		float fSlow58 = static_cast<float>(9 * iSlow31) / fSlow32;
+		int iSlow59 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow58 - std::floor(fSlow58))) / fSlow34));
 		int* fSoundfile0ca_of9 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu9 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch9 = fSoundfile0ca_bu9[0];
-		int iSlow60 = iSlow13 + 10;
-		float fSlow61 = static_cast<float>(iSlow60 < iSlow12);
-		int iSlow62 = static_cast<int>(fConst2 * (static_cast<float>(iSlow60) / fSlow17));
+		float fSlow60 = static_cast<float>(10 < iSlow16);
+		float fSlow61 = static_cast<float>(10 * iSlow31) / fSlow32;
+		int iSlow62 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow61 - std::floor(fSlow61))) / fSlow34));
 		int* fSoundfile0ca_of10 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu10 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch10 = fSoundfile0ca_bu10[0];
-		int iSlow63 = iSlow13 + 11;
-		float fSlow64 = static_cast<float>(iSlow63 < iSlow12);
-		int iSlow65 = static_cast<int>(fConst2 * (static_cast<float>(iSlow63) / fSlow17));
+		float fSlow63 = static_cast<float>(11 < iSlow16);
+		float fSlow64 = static_cast<float>(11 * iSlow31) / fSlow32;
+		int iSlow65 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow64 - std::floor(fSlow64))) / fSlow34));
 		int* fSoundfile0ca_of11 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu11 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch11 = fSoundfile0ca_bu11[0];
-		int iSlow66 = iSlow13 + 12;
-		float fSlow67 = static_cast<float>(iSlow66 < iSlow12);
-		int iSlow68 = static_cast<int>(fConst2 * (static_cast<float>(iSlow66) / fSlow17));
+		float fSlow66 = static_cast<float>(12 < iSlow16);
+		float fSlow67 = static_cast<float>(12 * iSlow31) / fSlow32;
+		int iSlow68 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow67 - std::floor(fSlow67))) / fSlow34));
 		int* fSoundfile0ca_of12 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu12 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch12 = fSoundfile0ca_bu12[0];
-		int iSlow69 = iSlow13 + 13;
-		float fSlow70 = static_cast<float>(iSlow69 < iSlow12);
-		int iSlow71 = static_cast<int>(fConst2 * (static_cast<float>(iSlow69) / fSlow17));
+		float fSlow69 = static_cast<float>(13 < iSlow16);
+		float fSlow70 = static_cast<float>(13 * iSlow31) / fSlow32;
+		int iSlow71 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow70 - std::floor(fSlow70))) / fSlow34));
 		int* fSoundfile0ca_of13 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu13 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch13 = fSoundfile0ca_bu13[0];
-		int iSlow72 = iSlow13 + 14;
-		float fSlow73 = static_cast<float>(iSlow72 < iSlow12);
-		int iSlow74 = static_cast<int>(fConst2 * (static_cast<float>(iSlow72) / fSlow17));
+		float fSlow72 = static_cast<float>(14 < iSlow16);
+		float fSlow73 = static_cast<float>(14 * iSlow31) / fSlow32;
+		int iSlow74 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow73 - std::floor(fSlow73))) / fSlow34));
 		int* fSoundfile0ca_of14 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu14 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch14 = fSoundfile0ca_bu14[0];
-		int iSlow75 = iSlow13 + 15;
-		float fSlow76 = static_cast<float>(iSlow75 < iSlow12);
-		int iSlow77 = static_cast<int>(fConst2 * (static_cast<float>(iSlow75) / fSlow17));
+		float fSlow75 = static_cast<float>(15 < iSlow16);
+		float fSlow76 = static_cast<float>(15 * iSlow31) / fSlow32;
+		int iSlow77 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow76 - std::floor(fSlow76))) / fSlow34));
 		int* fSoundfile0ca_of15 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu15 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch15 = fSoundfile0ca_bu15[0];
-		int iSlow78 = iSlow13 + 16;
-		float fSlow79 = static_cast<float>(iSlow78 < iSlow12);
-		int iSlow80 = static_cast<int>(fConst2 * (static_cast<float>(iSlow78) / fSlow17));
+		float fSlow78 = static_cast<float>(16 < iSlow16);
+		float fSlow79 = static_cast<float>(16 * iSlow31) / fSlow32;
+		int iSlow80 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow79 - std::floor(fSlow79))) / fSlow34));
 		int* fSoundfile0ca_of16 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu16 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch16 = fSoundfile0ca_bu16[0];
-		int iSlow81 = iSlow13 + 17;
-		float fSlow82 = static_cast<float>(iSlow81 < iSlow12);
-		int iSlow83 = static_cast<int>(fConst2 * (static_cast<float>(iSlow81) / fSlow17));
+		float fSlow81 = static_cast<float>(17 < iSlow16);
+		float fSlow82 = static_cast<float>(17 * iSlow31) / fSlow32;
+		int iSlow83 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow82 - std::floor(fSlow82))) / fSlow34));
 		int* fSoundfile0ca_of17 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu17 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch17 = fSoundfile0ca_bu17[0];
-		int iSlow84 = iSlow13 + 18;
-		float fSlow85 = static_cast<float>(iSlow84 < iSlow12);
-		int iSlow86 = static_cast<int>(fConst2 * (static_cast<float>(iSlow84) / fSlow17));
+		float fSlow84 = static_cast<float>(18 < iSlow16);
+		float fSlow85 = static_cast<float>(18 * iSlow31) / fSlow32;
+		int iSlow86 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow85 - std::floor(fSlow85))) / fSlow34));
 		int* fSoundfile0ca_of18 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu18 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch18 = fSoundfile0ca_bu18[0];
-		int iSlow87 = iSlow13 + 19;
-		float fSlow88 = static_cast<float>(iSlow87 < iSlow12);
-		int iSlow89 = static_cast<int>(fConst2 * (static_cast<float>(iSlow87) / fSlow17));
+		float fSlow87 = static_cast<float>(19 < iSlow16);
+		float fSlow88 = static_cast<float>(19 * iSlow31) / fSlow32;
+		int iSlow89 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow88 - std::floor(fSlow88))) / fSlow34));
 		int* fSoundfile0ca_of19 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu19 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch19 = fSoundfile0ca_bu19[0];
-		int iSlow90 = iSlow13 + 20;
-		float fSlow91 = static_cast<float>(iSlow90 < iSlow12);
-		int iSlow92 = static_cast<int>(fConst2 * (static_cast<float>(iSlow90) / fSlow17));
+		float fSlow90 = static_cast<float>(20 < iSlow16);
+		float fSlow91 = static_cast<float>(20 * iSlow31) / fSlow32;
+		int iSlow92 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow91 - std::floor(fSlow91))) / fSlow34));
 		int* fSoundfile0ca_of20 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu20 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch20 = fSoundfile0ca_bu20[0];
-		int iSlow93 = iSlow13 + 21;
-		float fSlow94 = static_cast<float>(iSlow93 < iSlow12);
-		int iSlow95 = static_cast<int>(fConst2 * (static_cast<float>(iSlow93) / fSlow17));
+		float fSlow93 = static_cast<float>(21 < iSlow16);
+		float fSlow94 = static_cast<float>(21 * iSlow31) / fSlow32;
+		int iSlow95 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow94 - std::floor(fSlow94))) / fSlow34));
 		int* fSoundfile0ca_of21 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu21 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch21 = fSoundfile0ca_bu21[0];
-		int iSlow96 = iSlow13 + 22;
-		float fSlow97 = static_cast<float>(iSlow96 < iSlow12);
-		int iSlow98 = static_cast<int>(fConst2 * (static_cast<float>(iSlow96) / fSlow17));
+		float fSlow96 = static_cast<float>(22 < iSlow16);
+		float fSlow97 = static_cast<float>(22 * iSlow31) / fSlow32;
+		int iSlow98 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow97 - std::floor(fSlow97))) / fSlow34));
 		int* fSoundfile0ca_of22 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu22 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch22 = fSoundfile0ca_bu22[0];
-		int iSlow99 = iSlow13 + 23;
-		float fSlow100 = static_cast<float>(iSlow99 < iSlow12);
-		int iSlow101 = static_cast<int>(fConst2 * (static_cast<float>(iSlow99) / fSlow17));
+		float fSlow99 = static_cast<float>(23 < iSlow16);
+		float fSlow100 = static_cast<float>(23 * iSlow31) / fSlow32;
+		int iSlow101 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow100 - std::floor(fSlow100))) / fSlow34));
 		int* fSoundfile0ca_of23 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu23 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch23 = fSoundfile0ca_bu23[0];
-		int iSlow102 = iSlow13 + 24;
-		float fSlow103 = static_cast<float>(iSlow102 < iSlow12);
-		int iSlow104 = static_cast<int>(fConst2 * (static_cast<float>(iSlow102) / fSlow17));
+		float fSlow102 = static_cast<float>(24 < iSlow16);
+		float fSlow103 = static_cast<float>(24 * iSlow31) / fSlow32;
+		int iSlow104 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow103 - std::floor(fSlow103))) / fSlow34));
 		int* fSoundfile0ca_of24 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu24 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch24 = fSoundfile0ca_bu24[0];
-		int iSlow105 = iSlow13 + 25;
-		float fSlow106 = static_cast<float>(iSlow105 < iSlow12);
-		int iSlow107 = static_cast<int>(fConst2 * (static_cast<float>(iSlow105) / fSlow17));
+		float fSlow105 = static_cast<float>(25 < iSlow16);
+		float fSlow106 = static_cast<float>(25 * iSlow31) / fSlow32;
+		int iSlow107 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow106 - std::floor(fSlow106))) / fSlow34));
 		int* fSoundfile0ca_of25 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu25 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch25 = fSoundfile0ca_bu25[0];
-		int iSlow108 = iSlow13 + 26;
-		float fSlow109 = static_cast<float>(iSlow108 < iSlow12);
-		int iSlow110 = static_cast<int>(fConst2 * (static_cast<float>(iSlow108) / fSlow17));
+		float fSlow108 = static_cast<float>(26 < iSlow16);
+		float fSlow109 = static_cast<float>(26 * iSlow31) / fSlow32;
+		int iSlow110 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow109 - std::floor(fSlow109))) / fSlow34));
 		int* fSoundfile0ca_of26 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu26 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch26 = fSoundfile0ca_bu26[0];
-		int iSlow111 = iSlow13 + 27;
-		float fSlow112 = static_cast<float>(iSlow111 < iSlow12);
-		int iSlow113 = static_cast<int>(fConst2 * (static_cast<float>(iSlow111) / fSlow17));
+		float fSlow111 = static_cast<float>(27 < iSlow16);
+		float fSlow112 = static_cast<float>(27 * iSlow31) / fSlow32;
+		int iSlow113 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow112 - std::floor(fSlow112))) / fSlow34));
 		int* fSoundfile0ca_of27 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu27 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch27 = fSoundfile0ca_bu27[0];
-		int iSlow114 = iSlow13 + 28;
-		float fSlow115 = static_cast<float>(iSlow114 < iSlow12);
-		int iSlow116 = static_cast<int>(fConst2 * (static_cast<float>(iSlow114) / fSlow17));
+		float fSlow114 = static_cast<float>(28 < iSlow16);
+		float fSlow115 = static_cast<float>(28 * iSlow31) / fSlow32;
+		int iSlow116 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow115 - std::floor(fSlow115))) / fSlow34));
 		int* fSoundfile0ca_of28 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu28 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch28 = fSoundfile0ca_bu28[0];
-		int iSlow117 = iSlow13 + 29;
-		float fSlow118 = static_cast<float>(iSlow117 < iSlow12);
-		int iSlow119 = static_cast<int>(fConst2 * (static_cast<float>(iSlow117) / fSlow17));
+		float fSlow117 = static_cast<float>(29 < iSlow16);
+		float fSlow118 = static_cast<float>(29 * iSlow31) / fSlow32;
+		int iSlow119 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow118 - std::floor(fSlow118))) / fSlow34));
 		int* fSoundfile0ca_of29 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu29 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch29 = fSoundfile0ca_bu29[0];
-		int iSlow120 = iSlow13 + 30;
-		float fSlow121 = static_cast<float>(iSlow120 < iSlow12);
-		int iSlow122 = static_cast<int>(fConst2 * (static_cast<float>(iSlow120) / fSlow17));
+		float fSlow120 = static_cast<float>(30 < iSlow16);
+		float fSlow121 = static_cast<float>(30 * iSlow31) / fSlow32;
+		int iSlow122 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow121 - std::floor(fSlow121))) / fSlow34));
 		int* fSoundfile0ca_of30 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu30 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch30 = fSoundfile0ca_bu30[0];
-		int iSlow123 = iSlow13 + 31;
-		float fSlow124 = static_cast<float>(iSlow123 < iSlow12);
-		int iSlow125 = static_cast<int>(fConst2 * (static_cast<float>(iSlow123) / fSlow17));
+		float fSlow123 = static_cast<float>(31 < iSlow16);
+		float fSlow124 = static_cast<float>(31 * iSlow31) / fSlow32;
+		int iSlow125 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow124 - std::floor(fSlow124))) / fSlow34));
 		int* fSoundfile0ca_of31 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu31 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch31 = fSoundfile0ca_bu31[0];
-		int iSlow126 = iSlow13 + 32;
-		float fSlow127 = static_cast<float>(iSlow126 < iSlow12);
-		int iSlow128 = static_cast<int>(fConst2 * (static_cast<float>(iSlow126) / fSlow17));
+		float fSlow126 = static_cast<float>(32 < iSlow16);
+		float fSlow127 = static_cast<float>(32 * iSlow31) / fSlow32;
+		int iSlow128 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow127 - std::floor(fSlow127))) / fSlow34));
 		int* fSoundfile0ca_of32 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu32 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch32 = fSoundfile0ca_bu32[0];
-		int iSlow129 = iSlow13 + 33;
-		float fSlow130 = static_cast<float>(iSlow129 < iSlow12);
-		int iSlow131 = static_cast<int>(fConst2 * (static_cast<float>(iSlow129) / fSlow17));
+		float fSlow129 = static_cast<float>(33 < iSlow16);
+		float fSlow130 = static_cast<float>(33 * iSlow31) / fSlow32;
+		int iSlow131 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow130 - std::floor(fSlow130))) / fSlow34));
 		int* fSoundfile0ca_of33 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu33 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch33 = fSoundfile0ca_bu33[0];
-		int iSlow132 = iSlow13 + 34;
-		float fSlow133 = static_cast<float>(iSlow132 < iSlow12);
-		int iSlow134 = static_cast<int>(fConst2 * (static_cast<float>(iSlow132) / fSlow17));
+		float fSlow132 = static_cast<float>(34 < iSlow16);
+		float fSlow133 = static_cast<float>(34 * iSlow31) / fSlow32;
+		int iSlow134 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow133 - std::floor(fSlow133))) / fSlow34));
 		int* fSoundfile0ca_of34 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu34 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch34 = fSoundfile0ca_bu34[0];
-		int iSlow135 = iSlow13 + 35;
-		float fSlow136 = static_cast<float>(iSlow135 < iSlow12);
-		int iSlow137 = static_cast<int>(fConst2 * (static_cast<float>(iSlow135) / fSlow17));
+		float fSlow135 = static_cast<float>(35 < iSlow16);
+		float fSlow136 = static_cast<float>(35 * iSlow31) / fSlow32;
+		int iSlow137 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow136 - std::floor(fSlow136))) / fSlow34));
 		int* fSoundfile0ca_of35 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu35 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch35 = fSoundfile0ca_bu35[0];
-		int iSlow138 = iSlow13 + 36;
-		float fSlow139 = static_cast<float>(iSlow138 < iSlow12);
-		int iSlow140 = static_cast<int>(fConst2 * (static_cast<float>(iSlow138) / fSlow17));
+		float fSlow138 = static_cast<float>(36 < iSlow16);
+		float fSlow139 = static_cast<float>(36 * iSlow31) / fSlow32;
+		int iSlow140 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow139 - std::floor(fSlow139))) / fSlow34));
 		int* fSoundfile0ca_of36 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu36 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch36 = fSoundfile0ca_bu36[0];
-		int iSlow141 = iSlow13 + 37;
-		float fSlow142 = static_cast<float>(iSlow141 < iSlow12);
-		int iSlow143 = static_cast<int>(fConst2 * (static_cast<float>(iSlow141) / fSlow17));
+		float fSlow141 = static_cast<float>(37 < iSlow16);
+		float fSlow142 = static_cast<float>(37 * iSlow31) / fSlow32;
+		int iSlow143 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow142 - std::floor(fSlow142))) / fSlow34));
 		int* fSoundfile0ca_of37 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu37 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch37 = fSoundfile0ca_bu37[0];
-		int iSlow144 = iSlow13 + 38;
-		float fSlow145 = static_cast<float>(iSlow144 < iSlow12);
-		int iSlow146 = static_cast<int>(fConst2 * (static_cast<float>(iSlow144) / fSlow17));
+		float fSlow144 = static_cast<float>(38 < iSlow16);
+		float fSlow145 = static_cast<float>(38 * iSlow31) / fSlow32;
+		int iSlow146 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow145 - std::floor(fSlow145))) / fSlow34));
 		int* fSoundfile0ca_of38 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu38 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch38 = fSoundfile0ca_bu38[0];
-		int iSlow147 = iSlow13 + 39;
-		float fSlow148 = static_cast<float>(iSlow147 < iSlow12);
-		int iSlow149 = static_cast<int>(fConst2 * (static_cast<float>(iSlow147) / fSlow17));
+		float fSlow147 = static_cast<float>(39 < iSlow16);
+		float fSlow148 = static_cast<float>(39 * iSlow31) / fSlow32;
+		int iSlow149 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow148 - std::floor(fSlow148))) / fSlow34));
 		int* fSoundfile0ca_of39 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu39 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch39 = fSoundfile0ca_bu39[0];
-		int iSlow150 = iSlow13 + 40;
-		float fSlow151 = static_cast<float>(iSlow150 < iSlow12);
-		int iSlow152 = static_cast<int>(fConst2 * (static_cast<float>(iSlow150) / fSlow17));
+		float fSlow150 = static_cast<float>(40 < iSlow16);
+		float fSlow151 = static_cast<float>(40 * iSlow31) / fSlow32;
+		int iSlow152 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow151 - std::floor(fSlow151))) / fSlow34));
 		int* fSoundfile0ca_of40 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu40 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch40 = fSoundfile0ca_bu40[0];
-		int iSlow153 = iSlow13 + 41;
-		float fSlow154 = static_cast<float>(iSlow153 < iSlow12);
-		int iSlow155 = static_cast<int>(fConst2 * (static_cast<float>(iSlow153) / fSlow17));
+		float fSlow153 = static_cast<float>(41 < iSlow16);
+		float fSlow154 = static_cast<float>(41 * iSlow31) / fSlow32;
+		int iSlow155 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow154 - std::floor(fSlow154))) / fSlow34));
 		int* fSoundfile0ca_of41 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu41 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch41 = fSoundfile0ca_bu41[0];
-		int iSlow156 = iSlow13 + 42;
-		float fSlow157 = static_cast<float>(iSlow156 < iSlow12);
-		int iSlow158 = static_cast<int>(fConst2 * (static_cast<float>(iSlow156) / fSlow17));
+		float fSlow156 = static_cast<float>(42 < iSlow16);
+		float fSlow157 = static_cast<float>(42 * iSlow31) / fSlow32;
+		int iSlow158 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow157 - std::floor(fSlow157))) / fSlow34));
 		int* fSoundfile0ca_of42 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu42 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch42 = fSoundfile0ca_bu42[0];
-		int iSlow159 = iSlow13 + 43;
-		float fSlow160 = static_cast<float>(iSlow159 < iSlow12);
-		int iSlow161 = static_cast<int>(fConst2 * (static_cast<float>(iSlow159) / fSlow17));
+		float fSlow159 = static_cast<float>(43 < iSlow16);
+		float fSlow160 = static_cast<float>(43 * iSlow31) / fSlow32;
+		int iSlow161 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow160 - std::floor(fSlow160))) / fSlow34));
 		int* fSoundfile0ca_of43 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu43 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch43 = fSoundfile0ca_bu43[0];
-		int iSlow162 = iSlow13 + 44;
-		float fSlow163 = static_cast<float>(iSlow162 < iSlow12);
-		int iSlow164 = static_cast<int>(fConst2 * (static_cast<float>(iSlow162) / fSlow17));
+		float fSlow162 = static_cast<float>(44 < iSlow16);
+		float fSlow163 = static_cast<float>(44 * iSlow31) / fSlow32;
+		int iSlow164 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow163 - std::floor(fSlow163))) / fSlow34));
 		int* fSoundfile0ca_of44 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu44 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch44 = fSoundfile0ca_bu44[0];
-		int iSlow165 = iSlow13 + 45;
-		float fSlow166 = static_cast<float>(iSlow165 < iSlow12);
-		int iSlow167 = static_cast<int>(fConst2 * (static_cast<float>(iSlow165) / fSlow17));
+		float fSlow165 = static_cast<float>(45 < iSlow16);
+		float fSlow166 = static_cast<float>(45 * iSlow31) / fSlow32;
+		int iSlow167 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow166 - std::floor(fSlow166))) / fSlow34));
 		int* fSoundfile0ca_of45 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu45 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch45 = fSoundfile0ca_bu45[0];
-		int iSlow168 = iSlow13 + 46;
-		float fSlow169 = static_cast<float>(iSlow168 < iSlow12);
-		int iSlow170 = static_cast<int>(fConst2 * (static_cast<float>(iSlow168) / fSlow17));
+		float fSlow168 = static_cast<float>(46 < iSlow16);
+		float fSlow169 = static_cast<float>(46 * iSlow31) / fSlow32;
+		int iSlow170 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow169 - std::floor(fSlow169))) / fSlow34));
 		int* fSoundfile0ca_of46 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu46 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch46 = fSoundfile0ca_bu46[0];
-		int iSlow171 = iSlow13 + 47;
-		float fSlow172 = static_cast<float>(iSlow171 < iSlow12);
-		int iSlow173 = static_cast<int>(fConst2 * (static_cast<float>(iSlow171) / fSlow17));
+		float fSlow171 = static_cast<float>(47 < iSlow16);
+		float fSlow172 = static_cast<float>(47 * iSlow31) / fSlow32;
+		int iSlow173 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow172 - std::floor(fSlow172))) / fSlow34));
 		int* fSoundfile0ca_of47 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu47 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch47 = fSoundfile0ca_bu47[0];
-		int iSlow174 = iSlow13 + 48;
-		float fSlow175 = static_cast<float>(iSlow174 < iSlow12);
-		int iSlow176 = static_cast<int>(fConst2 * (static_cast<float>(iSlow174) / fSlow17));
+		float fSlow174 = static_cast<float>(48 < iSlow16);
+		float fSlow175 = static_cast<float>(48 * iSlow31) / fSlow32;
+		int iSlow176 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow175 - std::floor(fSlow175))) / fSlow34));
 		int* fSoundfile0ca_of48 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu48 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch48 = fSoundfile0ca_bu48[0];
-		int iSlow177 = iSlow13 + 49;
-		float fSlow178 = static_cast<float>(iSlow177 < iSlow12);
-		int iSlow179 = static_cast<int>(fConst2 * (static_cast<float>(iSlow177) / fSlow17));
+		float fSlow177 = static_cast<float>(49 < iSlow16);
+		float fSlow178 = static_cast<float>(49 * iSlow31) / fSlow32;
+		int iSlow179 = static_cast<int>(fConst0 * (std::min<float>(0.999f, std::max<float>(0.0f, fSlow178 - std::floor(fSlow178))) / fSlow34));
 		int* fSoundfile0ca_of49 = fSoundfile0ca->fOffset;
 		float** fSoundfile0ca_bu49 = static_cast<float**>(fSoundfile0ca->fBuffers);
 		float* fSoundfile0ca_bu_ch49 = fSoundfile0ca_bu49[0];
@@ -110621,609 +110722,506 @@ struct mydsp : public base_dsp {
 			int iTemp3 = std::fabs(fTemp2) < 1.1920929e-07f;
 			float fTemp4 = ((iTemp3) ? 0.0f : std::exp(-(fConst1 / ((iTemp3) ? 1.0f : fTemp2))));
 			fRec1[0] = (1.0f - fTemp4) * ((iSlow2) ? ((iTemp1) ? fSlow7 : fSlow8) : 0.0f) + fTemp4 * fRec1[1];
-			int iTemp5 = 1 - iVec0[1];
-			float fTemp6 = ((iTemp5) ? 0.0f : fSlow16 + fRec4[1]);
-			fRec4[0] = fTemp6 - std::floor(fTemp6);
-			int iTemp7 = (fRec4[0] - fRec4[1]) < 0.0f;
-			iVec3[IOTA0 & 67108863] = iTemp7;
-			int iTemp8 = static_cast<int>(fSlow14 * static_cast<float>(iVec3[(IOTA0 - iSlow18) & 67108863]));
-			float fTemp9 = static_cast<float>((fSlow1 == fVec1[(IOTA0 - 96) & 127]) | iSlow21);
-			fRec6[0] = fSlow20 * (1.0f - 0.999f * fTemp9) + 0.999f * fTemp9 * fRec6[1];
-			float fTemp10 = fSlow19 * fRec6[0];
-			fRec5[0] = ((iTemp8) ? fTemp10 : fRec5[1]);
-			float fTemp11 = fConst1 * fRec5[0];
-			fRec3[0] = std::max<float>(0.0f, ((iTemp8) ? static_cast<float>(fTemp11 < 0.0f) : fRec3[1] + fTemp11));
-			float fTemp12 = ((fRec3[0] > 1.0f) ? 0.0f : fRec3[0]);
-			fRec8[0] = fSlow22 + 0.999f * fRec8[1];
-			fRec9[0] = fSlow23 + 0.999f * fRec9[1];
+			float fTemp5 = static_cast<float>((fSlow1 == fVec1[(IOTA0 - 96) & 127]) | iSlow15);
+			fRec3[0] = fSlow14 * (1.0f - 0.999f * fTemp5) + 0.999f * fTemp5 * fRec3[1];
+			int iTemp6 = 1 - iVec0[1];
+			float fTemp7 = ((iTemp6) ? 0.0f : fSlow19 + fRec5[1]);
+			fRec5[0] = fTemp7 - std::floor(fTemp7);
+			int iTemp8 = (fRec5[0] - fRec5[1]) < 0.0f;
+			iVec3[IOTA0 & 1048575] = iTemp8;
+			int iTemp9 = static_cast<int>(fSlow17 * static_cast<float>(iTemp8));
+			fRec8[0] = fSlow21 + 0.999f * fRec8[1];
+			fRec9[0] = fSlow22 + 0.999f * fRec9[1];
 			fRec7[0] = 0.001f * std::max<float>(1.0f, fRec8[0] * fRec9[0]) + 0.999f * fRec7[1];
-			float fTemp13 = std::min<float>(fRec7[0], fSlow24);
-			fRec10[0] = fSlow25 + 0.999f * fRec10[1];
-			float fTemp14 = std::pow(fRec10[0], 1e+01f);
-			float fTemp15 = 1.0f - fTemp14;
-			float fTemp16 = ((iTemp5) ? 0.0f : fSlow29 + fRec14[1]);
-			fRec14[0] = fTemp16 - std::floor(fTemp16);
-			float fTemp17 = ftbl0mydspSIG0[std::max<int>(0, std::min<int>(static_cast<int>(65536.0f * fRec14[0]), 65535))];
-			fRec12[0] = fSlow28 * fTemp17 + 0.999f * fRec12[1];
-			float fTemp18 = fRec12[0] * fTemp14 + fSlow27 * fTemp15 * fTemp17;
-			fRec11[0] = ((iTemp8) ? fTemp18 : fRec11[1]);
-			fRec15[0] = fSlow30 + 0.999f * fRec15[1];
-			float fTemp19 = fTemp14 * (fRec15[0] + fTemp18);
-			int iTemp20 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp12 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp15 * (fSlow26 + fRec11[0]) + fTemp19, 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			fRec17[0] = fSlow32 + 0.92f * fRec17[1];
-			fRec16[0] = 0.06f * std::fabs(fSlow26 - fRec17[0]) + 0.94f * fRec16[1];
-			float fTemp21 = fTemp15 * std::min<float>(22.0f, 9e+03f * fRec16[0]) + 1.0f;
-			float fTemp22 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp12)), fTemp21);
-			int iTemp23 = static_cast<int>(fSlow34 * static_cast<float>(iVec3[(IOTA0 - iSlow35) & 67108863]));
-			fRec19[0] = ((iTemp23) ? fTemp10 : fRec19[1]);
-			float fTemp24 = fConst1 * fRec19[0];
-			fRec18[0] = std::max<float>(0.0f, ((iTemp23) ? static_cast<float>(fTemp24 < 0.0f) : fRec18[1] + fTemp24));
-			float fTemp25 = ((fRec18[0] > 1.0f) ? 0.0f : fRec18[0]);
-			fRec20[0] = ((iTemp23) ? fTemp18 : fRec20[1]);
-			int iTemp26 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp25 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec20[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp27 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp25)), fTemp21);
-			int iTemp28 = static_cast<int>(fSlow37 * static_cast<float>(iVec3[(IOTA0 - iSlow38) & 67108863]));
-			fRec22[0] = ((iTemp28) ? fTemp10 : fRec22[1]);
-			float fTemp29 = fConst1 * fRec22[0];
-			fRec21[0] = std::max<float>(0.0f, ((iTemp28) ? static_cast<float>(fTemp29 < 0.0f) : fRec21[1] + fTemp29));
-			float fTemp30 = ((fRec21[0] > 1.0f) ? 0.0f : fRec21[0]);
-			fRec23[0] = ((iTemp28) ? fTemp18 : fRec23[1]);
-			int iTemp31 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp30 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec23[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp32 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp30)), fTemp21);
-			int iTemp33 = static_cast<int>(fSlow40 * static_cast<float>(iVec3[(IOTA0 - iSlow41) & 67108863]));
-			fRec25[0] = ((iTemp33) ? fTemp10 : fRec25[1]);
-			float fTemp34 = fConst1 * fRec25[0];
-			fRec24[0] = std::max<float>(0.0f, ((iTemp33) ? static_cast<float>(fTemp34 < 0.0f) : fRec24[1] + fTemp34));
-			float fTemp35 = ((fRec24[0] > 1.0f) ? 0.0f : fRec24[0]);
-			fRec26[0] = ((iTemp33) ? fTemp18 : fRec26[1]);
-			int iTemp36 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp35 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec26[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp37 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp35)), fTemp21);
-			int iTemp38 = static_cast<int>(fSlow43 * static_cast<float>(iVec3[(IOTA0 - iSlow44) & 67108863]));
-			fRec28[0] = ((iTemp38) ? fTemp10 : fRec28[1]);
-			float fTemp39 = fConst1 * fRec28[0];
-			fRec27[0] = std::max<float>(0.0f, ((iTemp38) ? static_cast<float>(fTemp39 < 0.0f) : fRec27[1] + fTemp39));
-			float fTemp40 = ((fRec27[0] > 1.0f) ? 0.0f : fRec27[0]);
-			fRec29[0] = ((iTemp38) ? fTemp18 : fRec29[1]);
-			int iTemp41 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp40 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec29[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp42 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp40)), fTemp21);
-			int iTemp43 = static_cast<int>(fSlow46 * static_cast<float>(iVec3[(IOTA0 - iSlow47) & 67108863]));
-			fRec31[0] = ((iTemp43) ? fTemp10 : fRec31[1]);
-			float fTemp44 = fConst1 * fRec31[0];
-			fRec30[0] = std::max<float>(0.0f, ((iTemp43) ? static_cast<float>(fTemp44 < 0.0f) : fRec30[1] + fTemp44));
-			float fTemp45 = ((fRec30[0] > 1.0f) ? 0.0f : fRec30[0]);
-			fRec32[0] = ((iTemp43) ? fTemp18 : fRec32[1]);
-			int iTemp46 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp45 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec32[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp47 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp45)), fTemp21);
-			int iTemp48 = static_cast<int>(fSlow49 * static_cast<float>(iVec3[(IOTA0 - iSlow50) & 67108863]));
-			fRec34[0] = ((iTemp48) ? fTemp10 : fRec34[1]);
-			float fTemp49 = fConst1 * fRec34[0];
-			fRec33[0] = std::max<float>(0.0f, ((iTemp48) ? static_cast<float>(fTemp49 < 0.0f) : fRec33[1] + fTemp49));
-			float fTemp50 = ((fRec33[0] > 1.0f) ? 0.0f : fRec33[0]);
-			fRec35[0] = ((iTemp48) ? fTemp18 : fRec35[1]);
-			int iTemp51 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp50 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec35[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp52 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp50)), fTemp21);
-			int iTemp53 = static_cast<int>(fSlow52 * static_cast<float>(iVec3[(IOTA0 - iSlow53) & 67108863]));
-			fRec37[0] = ((iTemp53) ? fTemp10 : fRec37[1]);
-			float fTemp54 = fConst1 * fRec37[0];
-			fRec36[0] = std::max<float>(0.0f, ((iTemp53) ? static_cast<float>(fTemp54 < 0.0f) : fRec36[1] + fTemp54));
-			float fTemp55 = ((fRec36[0] > 1.0f) ? 0.0f : fRec36[0]);
-			fRec38[0] = ((iTemp53) ? fTemp18 : fRec38[1]);
-			int iTemp56 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp55 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec38[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp57 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp55)), fTemp21);
-			int iTemp58 = static_cast<int>(fSlow55 * static_cast<float>(iVec3[(IOTA0 - iSlow56) & 67108863]));
-			fRec40[0] = ((iTemp58) ? fTemp10 : fRec40[1]);
-			float fTemp59 = fConst1 * fRec40[0];
-			fRec39[0] = std::max<float>(0.0f, ((iTemp58) ? static_cast<float>(fTemp59 < 0.0f) : fRec39[1] + fTemp59));
-			float fTemp60 = ((fRec39[0] > 1.0f) ? 0.0f : fRec39[0]);
-			fRec41[0] = ((iTemp58) ? fTemp18 : fRec41[1]);
-			int iTemp61 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp60 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec41[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp62 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp60)), fTemp21);
-			int iTemp63 = static_cast<int>(fSlow58 * static_cast<float>(iVec3[(IOTA0 - iSlow59) & 67108863]));
-			fRec43[0] = ((iTemp63) ? fTemp10 : fRec43[1]);
-			float fTemp64 = fConst1 * fRec43[0];
-			fRec42[0] = std::max<float>(0.0f, ((iTemp63) ? static_cast<float>(fTemp64 < 0.0f) : fRec42[1] + fTemp64));
-			float fTemp65 = ((fRec42[0] > 1.0f) ? 0.0f : fRec42[0]);
-			fRec44[0] = ((iTemp63) ? fTemp18 : fRec44[1]);
-			int iTemp66 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp65 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec44[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp67 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp65)), fTemp21);
-			int iTemp68 = static_cast<int>(fSlow61 * static_cast<float>(iVec3[(IOTA0 - iSlow62) & 67108863]));
-			fRec46[0] = ((iTemp68) ? fTemp10 : fRec46[1]);
-			float fTemp69 = fConst1 * fRec46[0];
-			fRec45[0] = std::max<float>(0.0f, ((iTemp68) ? static_cast<float>(fTemp69 < 0.0f) : fRec45[1] + fTemp69));
-			float fTemp70 = ((fRec45[0] > 1.0f) ? 0.0f : fRec45[0]);
-			fRec47[0] = ((iTemp68) ? fTemp18 : fRec47[1]);
-			int iTemp71 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp70 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec47[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp72 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp70)), fTemp21);
-			int iTemp73 = static_cast<int>(fSlow64 * static_cast<float>(iVec3[(IOTA0 - iSlow65) & 67108863]));
-			fRec49[0] = ((iTemp73) ? fTemp10 : fRec49[1]);
-			float fTemp74 = fConst1 * fRec49[0];
-			fRec48[0] = std::max<float>(0.0f, ((iTemp73) ? static_cast<float>(fTemp74 < 0.0f) : fRec48[1] + fTemp74));
-			float fTemp75 = ((fRec48[0] > 1.0f) ? 0.0f : fRec48[0]);
-			fRec50[0] = ((iTemp73) ? fTemp18 : fRec50[1]);
-			int iTemp76 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp75 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec50[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp77 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp75)), fTemp21);
-			int iTemp78 = static_cast<int>(fSlow67 * static_cast<float>(iVec3[(IOTA0 - iSlow68) & 67108863]));
-			fRec52[0] = ((iTemp78) ? fTemp10 : fRec52[1]);
-			float fTemp79 = fConst1 * fRec52[0];
-			fRec51[0] = std::max<float>(0.0f, ((iTemp78) ? static_cast<float>(fTemp79 < 0.0f) : fRec51[1] + fTemp79));
-			float fTemp80 = ((fRec51[0] > 1.0f) ? 0.0f : fRec51[0]);
-			fRec53[0] = ((iTemp78) ? fTemp18 : fRec53[1]);
-			int iTemp81 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp80 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec53[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp82 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp80)), fTemp21);
-			int iTemp83 = static_cast<int>(fSlow70 * static_cast<float>(iVec3[(IOTA0 - iSlow71) & 67108863]));
-			fRec55[0] = ((iTemp83) ? fTemp10 : fRec55[1]);
-			float fTemp84 = fConst1 * fRec55[0];
-			fRec54[0] = std::max<float>(0.0f, ((iTemp83) ? static_cast<float>(fTemp84 < 0.0f) : fRec54[1] + fTemp84));
-			float fTemp85 = ((fRec54[0] > 1.0f) ? 0.0f : fRec54[0]);
-			fRec56[0] = ((iTemp83) ? fTemp18 : fRec56[1]);
-			int iTemp86 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp85 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec56[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp87 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp85)), fTemp21);
-			int iTemp88 = static_cast<int>(fSlow73 * static_cast<float>(iVec3[(IOTA0 - iSlow74) & 67108863]));
-			fRec58[0] = ((iTemp88) ? fTemp10 : fRec58[1]);
-			float fTemp89 = fConst1 * fRec58[0];
-			fRec57[0] = std::max<float>(0.0f, ((iTemp88) ? static_cast<float>(fTemp89 < 0.0f) : fRec57[1] + fTemp89));
-			float fTemp90 = ((fRec57[0] > 1.0f) ? 0.0f : fRec57[0]);
-			fRec59[0] = ((iTemp88) ? fTemp18 : fRec59[1]);
-			int iTemp91 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp90 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec59[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp92 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp90)), fTemp21);
-			int iTemp93 = static_cast<int>(fSlow76 * static_cast<float>(iVec3[(IOTA0 - iSlow77) & 67108863]));
-			fRec61[0] = ((iTemp93) ? fTemp10 : fRec61[1]);
-			float fTemp94 = fConst1 * fRec61[0];
-			fRec60[0] = std::max<float>(0.0f, ((iTemp93) ? static_cast<float>(fTemp94 < 0.0f) : fRec60[1] + fTemp94));
-			float fTemp95 = ((fRec60[0] > 1.0f) ? 0.0f : fRec60[0]);
-			fRec62[0] = ((iTemp93) ? fTemp18 : fRec62[1]);
-			int iTemp96 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp95 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec62[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp97 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp95)), fTemp21);
-			int iTemp98 = static_cast<int>(fSlow79 * static_cast<float>(iVec3[(IOTA0 - iSlow80) & 67108863]));
-			fRec64[0] = ((iTemp98) ? fTemp10 : fRec64[1]);
-			float fTemp99 = fConst1 * fRec64[0];
-			fRec63[0] = std::max<float>(0.0f, ((iTemp98) ? static_cast<float>(fTemp99 < 0.0f) : fRec63[1] + fTemp99));
-			float fTemp100 = ((fRec63[0] > 1.0f) ? 0.0f : fRec63[0]);
-			fRec65[0] = ((iTemp98) ? fTemp18 : fRec65[1]);
-			int iTemp101 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp100 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec65[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp102 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp100)), fTemp21);
-			int iTemp103 = static_cast<int>(fSlow82 * static_cast<float>(iVec3[(IOTA0 - iSlow83) & 67108863]));
-			fRec67[0] = ((iTemp103) ? fTemp10 : fRec67[1]);
-			float fTemp104 = fConst1 * fRec67[0];
-			fRec66[0] = std::max<float>(0.0f, ((iTemp103) ? static_cast<float>(fTemp104 < 0.0f) : fRec66[1] + fTemp104));
-			float fTemp105 = ((fRec66[0] > 1.0f) ? 0.0f : fRec66[0]);
-			fRec68[0] = ((iTemp103) ? fTemp18 : fRec68[1]);
-			int iTemp106 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp105 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec68[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp107 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp105)), fTemp21);
-			int iTemp108 = static_cast<int>(fSlow85 * static_cast<float>(iVec3[(IOTA0 - iSlow86) & 67108863]));
-			fRec70[0] = ((iTemp108) ? fTemp10 : fRec70[1]);
-			float fTemp109 = fConst1 * fRec70[0];
-			fRec69[0] = std::max<float>(0.0f, ((iTemp108) ? static_cast<float>(fTemp109 < 0.0f) : fRec69[1] + fTemp109));
-			float fTemp110 = ((fRec69[0] > 1.0f) ? 0.0f : fRec69[0]);
-			fRec71[0] = ((iTemp108) ? fTemp18 : fRec71[1]);
-			int iTemp111 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp110 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec71[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp112 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp110)), fTemp21);
-			int iTemp113 = static_cast<int>(fSlow88 * static_cast<float>(iVec3[(IOTA0 - iSlow89) & 67108863]));
-			fRec73[0] = ((iTemp113) ? fTemp10 : fRec73[1]);
-			float fTemp114 = fConst1 * fRec73[0];
-			fRec72[0] = std::max<float>(0.0f, ((iTemp113) ? static_cast<float>(fTemp114 < 0.0f) : fRec72[1] + fTemp114));
-			float fTemp115 = ((fRec72[0] > 1.0f) ? 0.0f : fRec72[0]);
-			fRec74[0] = ((iTemp113) ? fTemp18 : fRec74[1]);
-			int iTemp116 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp115 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec74[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp117 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp115)), fTemp21);
-			int iTemp118 = static_cast<int>(fSlow91 * static_cast<float>(iVec3[(IOTA0 - iSlow92) & 67108863]));
-			fRec76[0] = ((iTemp118) ? fTemp10 : fRec76[1]);
-			float fTemp119 = fConst1 * fRec76[0];
-			fRec75[0] = std::max<float>(0.0f, ((iTemp118) ? static_cast<float>(fTemp119 < 0.0f) : fRec75[1] + fTemp119));
-			float fTemp120 = ((fRec75[0] > 1.0f) ? 0.0f : fRec75[0]);
-			fRec77[0] = ((iTemp118) ? fTemp18 : fRec77[1]);
-			int iTemp121 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp120 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec77[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp122 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp120)), fTemp21);
-			int iTemp123 = static_cast<int>(fSlow94 * static_cast<float>(iVec3[(IOTA0 - iSlow95) & 67108863]));
-			fRec79[0] = ((iTemp123) ? fTemp10 : fRec79[1]);
-			float fTemp124 = fConst1 * fRec79[0];
-			fRec78[0] = std::max<float>(0.0f, ((iTemp123) ? static_cast<float>(fTemp124 < 0.0f) : fRec78[1] + fTemp124));
-			float fTemp125 = ((fRec78[0] > 1.0f) ? 0.0f : fRec78[0]);
-			fRec80[0] = ((iTemp123) ? fTemp18 : fRec80[1]);
-			int iTemp126 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp125 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec80[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp127 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp125)), fTemp21);
-			int iTemp128 = static_cast<int>(fSlow97 * static_cast<float>(iVec3[(IOTA0 - iSlow98) & 67108863]));
-			fRec82[0] = ((iTemp128) ? fTemp10 : fRec82[1]);
-			float fTemp129 = fConst1 * fRec82[0];
-			fRec81[0] = std::max<float>(0.0f, ((iTemp128) ? static_cast<float>(fTemp129 < 0.0f) : fRec81[1] + fTemp129));
-			float fTemp130 = ((fRec81[0] > 1.0f) ? 0.0f : fRec81[0]);
-			fRec83[0] = ((iTemp128) ? fTemp18 : fRec83[1]);
-			int iTemp131 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp130 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec83[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp132 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp130)), fTemp21);
-			int iTemp133 = static_cast<int>(fSlow100 * static_cast<float>(iVec3[(IOTA0 - iSlow101) & 67108863]));
-			fRec85[0] = ((iTemp133) ? fTemp10 : fRec85[1]);
-			float fTemp134 = fConst1 * fRec85[0];
-			fRec84[0] = std::max<float>(0.0f, ((iTemp133) ? static_cast<float>(fTemp134 < 0.0f) : fRec84[1] + fTemp134));
-			float fTemp135 = ((fRec84[0] > 1.0f) ? 0.0f : fRec84[0]);
-			fRec86[0] = ((iTemp133) ? fTemp18 : fRec86[1]);
-			int iTemp136 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp135 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec86[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp137 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp135)), fTemp21);
-			int iTemp138 = static_cast<int>(fSlow103 * static_cast<float>(iVec3[(IOTA0 - iSlow104) & 67108863]));
-			fRec88[0] = ((iTemp138) ? fTemp10 : fRec88[1]);
-			float fTemp139 = fConst1 * fRec88[0];
-			fRec87[0] = std::max<float>(0.0f, ((iTemp138) ? static_cast<float>(fTemp139 < 0.0f) : fRec87[1] + fTemp139));
-			float fTemp140 = ((fRec87[0] > 1.0f) ? 0.0f : fRec87[0]);
-			fRec89[0] = ((iTemp138) ? fTemp18 : fRec89[1]);
-			int iTemp141 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp140 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec89[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp142 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp140)), fTemp21);
-			int iTemp143 = static_cast<int>(fSlow106 * static_cast<float>(iVec3[(IOTA0 - iSlow107) & 67108863]));
-			fRec91[0] = ((iTemp143) ? fTemp10 : fRec91[1]);
-			float fTemp144 = fConst1 * fRec91[0];
-			fRec90[0] = std::max<float>(0.0f, ((iTemp143) ? static_cast<float>(fTemp144 < 0.0f) : fRec90[1] + fTemp144));
-			float fTemp145 = ((fRec90[0] > 1.0f) ? 0.0f : fRec90[0]);
-			fRec92[0] = ((iTemp143) ? fTemp18 : fRec92[1]);
-			int iTemp146 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp145 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec92[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp147 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp145)), fTemp21);
-			int iTemp148 = static_cast<int>(fSlow109 * static_cast<float>(iVec3[(IOTA0 - iSlow110) & 67108863]));
-			fRec94[0] = ((iTemp148) ? fTemp10 : fRec94[1]);
-			float fTemp149 = fConst1 * fRec94[0];
-			fRec93[0] = std::max<float>(0.0f, ((iTemp148) ? static_cast<float>(fTemp149 < 0.0f) : fRec93[1] + fTemp149));
-			float fTemp150 = ((fRec93[0] > 1.0f) ? 0.0f : fRec93[0]);
-			fRec95[0] = ((iTemp148) ? fTemp18 : fRec95[1]);
-			int iTemp151 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp150 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec95[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp152 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp150)), fTemp21);
-			int iTemp153 = static_cast<int>(fSlow112 * static_cast<float>(iVec3[(IOTA0 - iSlow113) & 67108863]));
-			fRec97[0] = ((iTemp153) ? fTemp10 : fRec97[1]);
-			float fTemp154 = fConst1 * fRec97[0];
-			fRec96[0] = std::max<float>(0.0f, ((iTemp153) ? static_cast<float>(fTemp154 < 0.0f) : fRec96[1] + fTemp154));
-			float fTemp155 = ((fRec96[0] > 1.0f) ? 0.0f : fRec96[0]);
-			fRec98[0] = ((iTemp153) ? fTemp18 : fRec98[1]);
-			int iTemp156 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp155 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec98[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp157 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp155)), fTemp21);
-			int iTemp158 = static_cast<int>(fSlow115 * static_cast<float>(iVec3[(IOTA0 - iSlow116) & 67108863]));
-			fRec100[0] = ((iTemp158) ? fTemp10 : fRec100[1]);
-			float fTemp159 = fConst1 * fRec100[0];
-			fRec99[0] = std::max<float>(0.0f, ((iTemp158) ? static_cast<float>(fTemp159 < 0.0f) : fRec99[1] + fTemp159));
-			float fTemp160 = ((fRec99[0] > 1.0f) ? 0.0f : fRec99[0]);
-			fRec101[0] = ((iTemp158) ? fTemp18 : fRec101[1]);
-			int iTemp161 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp160 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec101[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp162 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp160)), fTemp21);
-			int iTemp163 = static_cast<int>(fSlow118 * static_cast<float>(iVec3[(IOTA0 - iSlow119) & 67108863]));
-			fRec103[0] = ((iTemp163) ? fTemp10 : fRec103[1]);
-			float fTemp164 = fConst1 * fRec103[0];
-			fRec102[0] = std::max<float>(0.0f, ((iTemp163) ? static_cast<float>(fTemp164 < 0.0f) : fRec102[1] + fTemp164));
-			float fTemp165 = ((fRec102[0] > 1.0f) ? 0.0f : fRec102[0]);
-			fRec104[0] = ((iTemp163) ? fTemp18 : fRec104[1]);
-			int iTemp166 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp165 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec104[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp167 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp165)), fTemp21);
-			int iTemp168 = static_cast<int>(fSlow121 * static_cast<float>(iVec3[(IOTA0 - iSlow122) & 67108863]));
-			fRec106[0] = ((iTemp168) ? fTemp10 : fRec106[1]);
-			float fTemp169 = fConst1 * fRec106[0];
-			fRec105[0] = std::max<float>(0.0f, ((iTemp168) ? static_cast<float>(fTemp169 < 0.0f) : fRec105[1] + fTemp169));
-			float fTemp170 = ((fRec105[0] > 1.0f) ? 0.0f : fRec105[0]);
-			fRec107[0] = ((iTemp168) ? fTemp18 : fRec107[1]);
-			int iTemp171 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp170 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec107[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp172 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp170)), fTemp21);
-			int iTemp173 = static_cast<int>(fSlow124 * static_cast<float>(iVec3[(IOTA0 - iSlow125) & 67108863]));
-			fRec109[0] = ((iTemp173) ? fTemp10 : fRec109[1]);
-			float fTemp174 = fConst1 * fRec109[0];
-			fRec108[0] = std::max<float>(0.0f, ((iTemp173) ? static_cast<float>(fTemp174 < 0.0f) : fRec108[1] + fTemp174));
-			float fTemp175 = ((fRec108[0] > 1.0f) ? 0.0f : fRec108[0]);
-			fRec110[0] = ((iTemp173) ? fTemp18 : fRec110[1]);
-			int iTemp176 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp175 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec110[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp177 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp175)), fTemp21);
-			int iTemp178 = static_cast<int>(fSlow127 * static_cast<float>(iVec3[(IOTA0 - iSlow128) & 67108863]));
-			fRec112[0] = ((iTemp178) ? fTemp10 : fRec112[1]);
-			float fTemp179 = fConst1 * fRec112[0];
-			fRec111[0] = std::max<float>(0.0f, ((iTemp178) ? static_cast<float>(fTemp179 < 0.0f) : fRec111[1] + fTemp179));
-			float fTemp180 = ((fRec111[0] > 1.0f) ? 0.0f : fRec111[0]);
-			fRec113[0] = ((iTemp178) ? fTemp18 : fRec113[1]);
-			int iTemp181 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp180 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec113[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp182 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp180)), fTemp21);
-			int iTemp183 = static_cast<int>(fSlow130 * static_cast<float>(iVec3[(IOTA0 - iSlow131) & 67108863]));
-			fRec115[0] = ((iTemp183) ? fTemp10 : fRec115[1]);
-			float fTemp184 = fConst1 * fRec115[0];
-			fRec114[0] = std::max<float>(0.0f, ((iTemp183) ? static_cast<float>(fTemp184 < 0.0f) : fRec114[1] + fTemp184));
-			float fTemp185 = ((fRec114[0] > 1.0f) ? 0.0f : fRec114[0]);
-			fRec116[0] = ((iTemp183) ? fTemp18 : fRec116[1]);
-			int iTemp186 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp185 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec116[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp187 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp185)), fTemp21);
-			int iTemp188 = static_cast<int>(fSlow133 * static_cast<float>(iVec3[(IOTA0 - iSlow134) & 67108863]));
-			fRec118[0] = ((iTemp188) ? fTemp10 : fRec118[1]);
-			float fTemp189 = fConst1 * fRec118[0];
-			fRec117[0] = std::max<float>(0.0f, ((iTemp188) ? static_cast<float>(fTemp189 < 0.0f) : fRec117[1] + fTemp189));
-			float fTemp190 = ((fRec117[0] > 1.0f) ? 0.0f : fRec117[0]);
-			fRec119[0] = ((iTemp188) ? fTemp18 : fRec119[1]);
-			int iTemp191 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp190 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec119[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp192 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp190)), fTemp21);
-			int iTemp193 = static_cast<int>(fSlow136 * static_cast<float>(iVec3[(IOTA0 - iSlow137) & 67108863]));
-			fRec121[0] = ((iTemp193) ? fTemp10 : fRec121[1]);
-			float fTemp194 = fConst1 * fRec121[0];
-			fRec120[0] = std::max<float>(0.0f, ((iTemp193) ? static_cast<float>(fTemp194 < 0.0f) : fRec120[1] + fTemp194));
-			float fTemp195 = ((fRec120[0] > 1.0f) ? 0.0f : fRec120[0]);
-			fRec122[0] = ((iTemp193) ? fTemp18 : fRec122[1]);
-			int iTemp196 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp195 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec122[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp197 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp195)), fTemp21);
-			int iTemp198 = static_cast<int>(fSlow139 * static_cast<float>(iVec3[(IOTA0 - iSlow140) & 67108863]));
-			fRec124[0] = ((iTemp198) ? fTemp10 : fRec124[1]);
-			float fTemp199 = fConst1 * fRec124[0];
-			fRec123[0] = std::max<float>(0.0f, ((iTemp198) ? static_cast<float>(fTemp199 < 0.0f) : fRec123[1] + fTemp199));
-			float fTemp200 = ((fRec123[0] > 1.0f) ? 0.0f : fRec123[0]);
-			fRec125[0] = ((iTemp198) ? fTemp18 : fRec125[1]);
-			int iTemp201 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp200 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec125[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp202 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp200)), fTemp21);
-			int iTemp203 = static_cast<int>(fSlow142 * static_cast<float>(iVec3[(IOTA0 - iSlow143) & 67108863]));
-			fRec127[0] = ((iTemp203) ? fTemp10 : fRec127[1]);
-			float fTemp204 = fConst1 * fRec127[0];
-			fRec126[0] = std::max<float>(0.0f, ((iTemp203) ? static_cast<float>(fTemp204 < 0.0f) : fRec126[1] + fTemp204));
-			float fTemp205 = ((fRec126[0] > 1.0f) ? 0.0f : fRec126[0]);
-			fRec128[0] = ((iTemp203) ? fTemp18 : fRec128[1]);
-			int iTemp206 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp205 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec128[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp207 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp205)), fTemp21);
-			int iTemp208 = static_cast<int>(fSlow145 * static_cast<float>(iVec3[(IOTA0 - iSlow146) & 67108863]));
-			fRec130[0] = ((iTemp208) ? fTemp10 : fRec130[1]);
-			float fTemp209 = fConst1 * fRec130[0];
-			fRec129[0] = std::max<float>(0.0f, ((iTemp208) ? static_cast<float>(fTemp209 < 0.0f) : fRec129[1] + fTemp209));
-			float fTemp210 = ((fRec129[0] > 1.0f) ? 0.0f : fRec129[0]);
-			fRec131[0] = ((iTemp208) ? fTemp18 : fRec131[1]);
-			int iTemp211 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp210 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec131[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp212 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp210)), fTemp21);
-			int iTemp213 = static_cast<int>(fSlow148 * static_cast<float>(iVec3[(IOTA0 - iSlow149) & 67108863]));
-			fRec133[0] = ((iTemp213) ? fTemp10 : fRec133[1]);
-			float fTemp214 = fConst1 * fRec133[0];
-			fRec132[0] = std::max<float>(0.0f, ((iTemp213) ? static_cast<float>(fTemp214 < 0.0f) : fRec132[1] + fTemp214));
-			float fTemp215 = ((fRec132[0] > 1.0f) ? 0.0f : fRec132[0]);
-			fRec134[0] = ((iTemp213) ? fTemp18 : fRec134[1]);
-			int iTemp216 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp215 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec134[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp217 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp215)), fTemp21);
-			int iTemp218 = static_cast<int>(fSlow151 * static_cast<float>(iVec3[(IOTA0 - iSlow152) & 67108863]));
-			fRec136[0] = ((iTemp218) ? fTemp10 : fRec136[1]);
-			float fTemp219 = fConst1 * fRec136[0];
-			fRec135[0] = std::max<float>(0.0f, ((iTemp218) ? static_cast<float>(fTemp219 < 0.0f) : fRec135[1] + fTemp219));
-			float fTemp220 = ((fRec135[0] > 1.0f) ? 0.0f : fRec135[0]);
-			fRec137[0] = ((iTemp218) ? fTemp18 : fRec137[1]);
-			int iTemp221 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp220 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec137[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp222 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp220)), fTemp21);
-			int iTemp223 = static_cast<int>(fSlow154 * static_cast<float>(iVec3[(IOTA0 - iSlow155) & 67108863]));
-			fRec139[0] = ((iTemp223) ? fTemp10 : fRec139[1]);
-			float fTemp224 = fConst1 * fRec139[0];
-			fRec138[0] = std::max<float>(0.0f, ((iTemp223) ? static_cast<float>(fTemp224 < 0.0f) : fRec138[1] + fTemp224));
-			float fTemp225 = ((fRec138[0] > 1.0f) ? 0.0f : fRec138[0]);
-			fRec140[0] = ((iTemp223) ? fTemp18 : fRec140[1]);
-			int iTemp226 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp225 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec140[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp227 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp225)), fTemp21);
-			int iTemp228 = static_cast<int>(fSlow157 * static_cast<float>(iVec3[(IOTA0 - iSlow158) & 67108863]));
-			fRec142[0] = ((iTemp228) ? fTemp10 : fRec142[1]);
-			float fTemp229 = fConst1 * fRec142[0];
-			fRec141[0] = std::max<float>(0.0f, ((iTemp228) ? static_cast<float>(fTemp229 < 0.0f) : fRec141[1] + fTemp229));
-			float fTemp230 = ((fRec141[0] > 1.0f) ? 0.0f : fRec141[0]);
-			fRec143[0] = ((iTemp228) ? fTemp18 : fRec143[1]);
-			int iTemp231 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp230 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec143[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp232 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp230)), fTemp21);
-			int iTemp233 = static_cast<int>(fSlow160 * static_cast<float>(iVec3[(IOTA0 - iSlow161) & 67108863]));
-			fRec145[0] = ((iTemp233) ? fTemp10 : fRec145[1]);
-			float fTemp234 = fConst1 * fRec145[0];
-			fRec144[0] = std::max<float>(0.0f, ((iTemp233) ? static_cast<float>(fTemp234 < 0.0f) : fRec144[1] + fTemp234));
-			float fTemp235 = ((fRec144[0] > 1.0f) ? 0.0f : fRec144[0]);
-			fRec146[0] = ((iTemp233) ? fTemp18 : fRec146[1]);
-			int iTemp236 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp235 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec146[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp237 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp235)), fTemp21);
-			int iTemp238 = static_cast<int>(fSlow163 * static_cast<float>(iVec3[(IOTA0 - iSlow164) & 67108863]));
-			fRec148[0] = ((iTemp238) ? fTemp10 : fRec148[1]);
-			float fTemp239 = fConst1 * fRec148[0];
-			fRec147[0] = std::max<float>(0.0f, ((iTemp238) ? static_cast<float>(fTemp239 < 0.0f) : fRec147[1] + fTemp239));
-			float fTemp240 = ((fRec147[0] > 1.0f) ? 0.0f : fRec147[0]);
-			fRec149[0] = ((iTemp238) ? fTemp18 : fRec149[1]);
-			int iTemp241 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp240 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec149[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp242 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp240)), fTemp21);
-			int iTemp243 = static_cast<int>(fSlow166 * static_cast<float>(iVec3[(IOTA0 - iSlow167) & 67108863]));
-			fRec151[0] = ((iTemp243) ? fTemp10 : fRec151[1]);
-			float fTemp244 = fConst1 * fRec151[0];
-			fRec150[0] = std::max<float>(0.0f, ((iTemp243) ? static_cast<float>(fTemp244 < 0.0f) : fRec150[1] + fTemp244));
-			float fTemp245 = ((fRec150[0] > 1.0f) ? 0.0f : fRec150[0]);
-			fRec152[0] = ((iTemp243) ? fTemp18 : fRec152[1]);
-			int iTemp246 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp245 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec152[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp247 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp245)), fTemp21);
-			int iTemp248 = static_cast<int>(fSlow169 * static_cast<float>(iVec3[(IOTA0 - iSlow170) & 67108863]));
-			fRec154[0] = ((iTemp248) ? fTemp10 : fRec154[1]);
-			float fTemp249 = fConst1 * fRec154[0];
-			fRec153[0] = std::max<float>(0.0f, ((iTemp248) ? static_cast<float>(fTemp249 < 0.0f) : fRec153[1] + fTemp249));
-			float fTemp250 = ((fRec153[0] > 1.0f) ? 0.0f : fRec153[0]);
-			fRec155[0] = ((iTemp248) ? fTemp18 : fRec155[1]);
-			int iTemp251 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp250 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec155[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp252 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp250)), fTemp21);
-			int iTemp253 = static_cast<int>(fSlow172 * static_cast<float>(iVec3[(IOTA0 - iSlow173) & 67108863]));
-			fRec157[0] = ((iTemp253) ? fTemp10 : fRec157[1]);
-			float fTemp254 = fConst1 * fRec157[0];
-			fRec156[0] = std::max<float>(0.0f, ((iTemp253) ? static_cast<float>(fTemp254 < 0.0f) : fRec156[1] + fTemp254));
-			float fTemp255 = ((fRec156[0] > 1.0f) ? 0.0f : fRec156[0]);
-			fRec158[0] = ((iTemp253) ? fTemp18 : fRec158[1]);
-			int iTemp256 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp255 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec158[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp257 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp255)), fTemp21);
-			int iTemp258 = static_cast<int>(fSlow175 * static_cast<float>(iVec3[(IOTA0 - iSlow176) & 67108863]));
-			fRec160[0] = ((iTemp258) ? fTemp10 : fRec160[1]);
-			float fTemp259 = fConst1 * fRec160[0];
-			fRec159[0] = std::max<float>(0.0f, ((iTemp258) ? static_cast<float>(fTemp259 < 0.0f) : fRec159[1] + fTemp259));
-			float fTemp260 = ((fRec159[0] > 1.0f) ? 0.0f : fRec159[0]);
-			fRec161[0] = ((iTemp258) ? fTemp18 : fRec161[1]);
-			int iTemp261 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp260 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec161[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp262 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp260)), fTemp21);
-			int iTemp263 = static_cast<int>(fSlow178 * static_cast<float>(iVec3[(IOTA0 - iSlow179) & 67108863]));
-			fRec163[0] = ((iTemp263) ? fTemp10 : fRec163[1]);
-			float fTemp264 = fConst1 * fRec163[0];
-			fRec162[0] = std::max<float>(0.0f, ((iTemp263) ? static_cast<float>(fTemp264 < 0.0f) : fRec162[1] + fTemp264));
-			float fTemp265 = ((fRec162[0] > 1.0f) ? 0.0f : fRec162[0]);
-			fRec164[0] = ((iTemp263) ? fTemp18 : fRec164[1]);
-			int iTemp266 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fTemp265 * fTemp13 + fSlow10 * std::fmod(std::fmod(fTemp19 + fTemp15 * (fSlow26 + fRec164[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow31)));
-			float fTemp267 = std::pow(std::max<float>(1e-06f, std::sin(3.1415927f * fTemp265)), fTemp21);
-			float fTemp268 = fSlow0 * fRec1[0] * (fSoundfile0ca_bu_ch0[fSoundfile0ca_of0[0] + iTemp20] * fTemp22 + fSoundfile0ca_bu_ch1[fSoundfile0ca_of1[0] + iTemp26] * fTemp27 + fSoundfile0ca_bu_ch2[fSoundfile0ca_of2[0] + iTemp31] * fTemp32 + fSoundfile0ca_bu_ch3[fSoundfile0ca_of3[0] + iTemp36] * fTemp37 + fSoundfile0ca_bu_ch4[fSoundfile0ca_of4[0] + iTemp41] * fTemp42 + fSoundfile0ca_bu_ch5[fSoundfile0ca_of5[0] + iTemp46] * fTemp47 + fSoundfile0ca_bu_ch6[fSoundfile0ca_of6[0] + iTemp51] * fTemp52 + fSoundfile0ca_bu_ch7[fSoundfile0ca_of7[0] + iTemp56] * fTemp57 + fSoundfile0ca_bu_ch8[fSoundfile0ca_of8[0] + iTemp61] * fTemp62 + fSoundfile0ca_bu_ch9[fSoundfile0ca_of9[0] + iTemp66] * fTemp67 + fSoundfile0ca_bu_ch10[fSoundfile0ca_of10[0] + iTemp71] * fTemp72 + fSoundfile0ca_bu_ch11[fSoundfile0ca_of11[0] + iTemp76] * fTemp77 + fSoundfile0ca_bu_ch12[fSoundfile0ca_of12[0] + iTemp81] * fTemp82 + fSoundfile0ca_bu_ch13[fSoundfile0ca_of13[0] + iTemp86] * fTemp87 + fSoundfile0ca_bu_ch14[fSoundfile0ca_of14[0] + iTemp91] * fTemp92 + fSoundfile0ca_bu_ch15[fSoundfile0ca_of15[0] + iTemp96] * fTemp97 + fSoundfile0ca_bu_ch16[fSoundfile0ca_of16[0] + iTemp101] * fTemp102 + fSoundfile0ca_bu_ch17[fSoundfile0ca_of17[0] + iTemp106] * fTemp107 + fSoundfile0ca_bu_ch18[fSoundfile0ca_of18[0] + iTemp111] * fTemp112 + fSoundfile0ca_bu_ch19[fSoundfile0ca_of19[0] + iTemp116] * fTemp117 + fSoundfile0ca_bu_ch20[fSoundfile0ca_of20[0] + iTemp121] * fTemp122 + fSoundfile0ca_bu_ch21[fSoundfile0ca_of21[0] + iTemp126] * fTemp127 + fSoundfile0ca_bu_ch22[fSoundfile0ca_of22[0] + iTemp131] * fTemp132 + fSoundfile0ca_bu_ch23[fSoundfile0ca_of23[0] + iTemp136] * fTemp137 + fSoundfile0ca_bu_ch24[fSoundfile0ca_of24[0] + iTemp141] * fTemp142 + fSoundfile0ca_bu_ch25[fSoundfile0ca_of25[0] + iTemp146] * fTemp147 + fSoundfile0ca_bu_ch26[fSoundfile0ca_of26[0] + iTemp151] * fTemp152 + fSoundfile0ca_bu_ch27[fSoundfile0ca_of27[0] + iTemp156] * fTemp157 + fSoundfile0ca_bu_ch28[fSoundfile0ca_of28[0] + iTemp161] * fTemp162 + fSoundfile0ca_bu_ch29[fSoundfile0ca_of29[0] + iTemp166] * fTemp167 + fSoundfile0ca_bu_ch30[fSoundfile0ca_of30[0] + iTemp171] * fTemp172 + fSoundfile0ca_bu_ch31[fSoundfile0ca_of31[0] + iTemp176] * fTemp177 + fSoundfile0ca_bu_ch32[fSoundfile0ca_of32[0] + iTemp181] * fTemp182 + fSoundfile0ca_bu_ch33[fSoundfile0ca_of33[0] + iTemp186] * fTemp187 + fSoundfile0ca_bu_ch34[fSoundfile0ca_of34[0] + iTemp191] * fTemp192 + fSoundfile0ca_bu_ch35[fSoundfile0ca_of35[0] + iTemp196] * fTemp197 + fSoundfile0ca_bu_ch36[fSoundfile0ca_of36[0] + iTemp201] * fTemp202 + fSoundfile0ca_bu_ch37[fSoundfile0ca_of37[0] + iTemp206] * fTemp207 + fSoundfile0ca_bu_ch38[fSoundfile0ca_of38[0] + iTemp211] * fTemp212 + fSoundfile0ca_bu_ch39[fSoundfile0ca_of39[0] + iTemp216] * fTemp217 + fSoundfile0ca_bu_ch40[fSoundfile0ca_of40[0] + iTemp221] * fTemp222 + fSoundfile0ca_bu_ch41[fSoundfile0ca_of41[0] + iTemp226] * fTemp227 + fSoundfile0ca_bu_ch42[fSoundfile0ca_of42[0] + iTemp231] * fTemp232 + fSoundfile0ca_bu_ch43[fSoundfile0ca_of43[0] + iTemp236] * fTemp237 + fSoundfile0ca_bu_ch44[fSoundfile0ca_of44[0] + iTemp241] * fTemp242 + fSoundfile0ca_bu_ch45[fSoundfile0ca_of45[0] + iTemp246] * fTemp247 + fSoundfile0ca_bu_ch46[fSoundfile0ca_of46[0] + iTemp251] * fTemp252 + fSoundfile0ca_bu_ch47[fSoundfile0ca_of47[0] + iTemp256] * fTemp257 + fSoundfile0ca_bu_ch48[fSoundfile0ca_of48[0] + iTemp261] * fTemp262 + fSoundfile0ca_bu_ch49[fSoundfile0ca_of49[0] + iTemp266] * fTemp267);
-			fVec5[0] = fTemp268;
-			fRec0[0] = 0.995f * fRec0[1] + fTemp268 - fVec5[1];
+			float fTemp10 = std::min<float>(fRec7[0], fSlow23);
+			float fTemp11 = 1.0f / std::max<float>(1.0f, fSlow20 * fTemp10);
+			fRec6[0] = ((iTemp9) ? fTemp11 : fRec6[1]);
+			fRec4[0] = ((iTemp9) ? 0.0f : std::min<float>(1.0f, fRec6[0] + fRec4[1]));
+			fRec10[0] = fSlow24 + 0.999f * fRec10[1];
+			float fTemp12 = std::pow(fRec10[0], 1e+01f);
+			float fTemp13 = 1.0f - fTemp12;
+			fRec11[0] = fSlow25 + 0.999f * fRec11[1];
+			float fTemp14 = ((iTemp6) ? 0.0f : fSlow28 + fRec15[1]);
+			fRec15[0] = fTemp14 - std::floor(fTemp14);
+			float fTemp15 = ftbl0mydspSIG0[std::max<int>(0, std::min<int>(static_cast<int>(65536.0f * fRec15[0]), 65535))];
+			fRec13[0] = fSlow27 * fTemp15 + 0.999f * fRec13[1];
+			float fTemp16 = fRec13[0] * fTemp12 + fSlow26 * fTemp13 * fTemp15;
+			fRec12[0] = ((iTemp9) ? fTemp16 : fRec12[1]);
+			fRec16[0] = 0.001f * fRec11[0] + 0.999f * fRec16[1];
+			float fTemp17 = fTemp12 * (fRec16[0] + fTemp16);
+			int iTemp18 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec4[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp13 * (fRec11[0] + fRec12[0]) + fTemp17, 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp19 = std::sin(3.1415927f * fRec4[0]);
+			int iTemp20 = static_cast<int>(fSlow30 * static_cast<float>(iVec3[(IOTA0 - iSlow35) & 1048575]));
+			fRec18[0] = ((iTemp20) ? fTemp11 : fRec18[1]);
+			fRec17[0] = ((iTemp20) ? 0.0f : std::min<float>(1.0f, fRec18[0] + fRec17[1]));
+			fRec19[0] = ((iTemp20) ? fTemp16 : fRec19[1]);
+			int iTemp21 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec17[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec19[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp22 = std::sin(3.1415927f * fRec17[0]);
+			int iTemp23 = static_cast<int>(fSlow36 * static_cast<float>(iVec3[(IOTA0 - iSlow38) & 1048575]));
+			fRec21[0] = ((iTemp23) ? fTemp11 : fRec21[1]);
+			fRec20[0] = ((iTemp23) ? 0.0f : std::min<float>(1.0f, fRec21[0] + fRec20[1]));
+			fRec22[0] = ((iTemp23) ? fTemp16 : fRec22[1]);
+			int iTemp24 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec20[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec22[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp25 = std::sin(3.1415927f * fRec20[0]);
+			int iTemp26 = static_cast<int>(fSlow39 * static_cast<float>(iVec3[(IOTA0 - iSlow41) & 1048575]));
+			fRec24[0] = ((iTemp26) ? fTemp11 : fRec24[1]);
+			fRec23[0] = ((iTemp26) ? 0.0f : std::min<float>(1.0f, fRec24[0] + fRec23[1]));
+			fRec25[0] = ((iTemp26) ? fTemp16 : fRec25[1]);
+			int iTemp27 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec23[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec25[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp28 = std::sin(3.1415927f * fRec23[0]);
+			int iTemp29 = static_cast<int>(fSlow42 * static_cast<float>(iVec3[(IOTA0 - iSlow44) & 1048575]));
+			fRec27[0] = ((iTemp29) ? fTemp11 : fRec27[1]);
+			fRec26[0] = ((iTemp29) ? 0.0f : std::min<float>(1.0f, fRec27[0] + fRec26[1]));
+			fRec28[0] = ((iTemp29) ? fTemp16 : fRec28[1]);
+			int iTemp30 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec26[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec28[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp31 = std::sin(3.1415927f * fRec26[0]);
+			int iTemp32 = static_cast<int>(fSlow45 * static_cast<float>(iVec3[(IOTA0 - iSlow47) & 1048575]));
+			fRec30[0] = ((iTemp32) ? fTemp11 : fRec30[1]);
+			fRec29[0] = ((iTemp32) ? 0.0f : std::min<float>(1.0f, fRec30[0] + fRec29[1]));
+			fRec31[0] = ((iTemp32) ? fTemp16 : fRec31[1]);
+			int iTemp33 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec29[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec31[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp34 = std::sin(3.1415927f * fRec29[0]);
+			int iTemp35 = static_cast<int>(fSlow48 * static_cast<float>(iVec3[(IOTA0 - iSlow50) & 1048575]));
+			fRec33[0] = ((iTemp35) ? fTemp11 : fRec33[1]);
+			fRec32[0] = ((iTemp35) ? 0.0f : std::min<float>(1.0f, fRec33[0] + fRec32[1]));
+			fRec34[0] = ((iTemp35) ? fTemp16 : fRec34[1]);
+			int iTemp36 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec32[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec34[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp37 = std::sin(3.1415927f * fRec32[0]);
+			int iTemp38 = static_cast<int>(fSlow51 * static_cast<float>(iVec3[(IOTA0 - iSlow53) & 1048575]));
+			fRec36[0] = ((iTemp38) ? fTemp11 : fRec36[1]);
+			fRec35[0] = ((iTemp38) ? 0.0f : std::min<float>(1.0f, fRec36[0] + fRec35[1]));
+			fRec37[0] = ((iTemp38) ? fTemp16 : fRec37[1]);
+			int iTemp39 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec35[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec37[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp40 = std::sin(3.1415927f * fRec35[0]);
+			int iTemp41 = static_cast<int>(fSlow54 * static_cast<float>(iVec3[(IOTA0 - iSlow56) & 1048575]));
+			fRec39[0] = ((iTemp41) ? fTemp11 : fRec39[1]);
+			fRec38[0] = ((iTemp41) ? 0.0f : std::min<float>(1.0f, fRec39[0] + fRec38[1]));
+			fRec40[0] = ((iTemp41) ? fTemp16 : fRec40[1]);
+			int iTemp42 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec38[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec40[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp43 = std::sin(3.1415927f * fRec38[0]);
+			int iTemp44 = static_cast<int>(fSlow57 * static_cast<float>(iVec3[(IOTA0 - iSlow59) & 1048575]));
+			fRec42[0] = ((iTemp44) ? fTemp11 : fRec42[1]);
+			fRec41[0] = ((iTemp44) ? 0.0f : std::min<float>(1.0f, fRec42[0] + fRec41[1]));
+			fRec43[0] = ((iTemp44) ? fTemp16 : fRec43[1]);
+			int iTemp45 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec41[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec43[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp46 = std::sin(3.1415927f * fRec41[0]);
+			int iTemp47 = static_cast<int>(fSlow60 * static_cast<float>(iVec3[(IOTA0 - iSlow62) & 1048575]));
+			fRec45[0] = ((iTemp47) ? fTemp11 : fRec45[1]);
+			fRec44[0] = ((iTemp47) ? 0.0f : std::min<float>(1.0f, fRec45[0] + fRec44[1]));
+			fRec46[0] = ((iTemp47) ? fTemp16 : fRec46[1]);
+			int iTemp48 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec44[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec46[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp49 = std::sin(3.1415927f * fRec44[0]);
+			int iTemp50 = static_cast<int>(fSlow63 * static_cast<float>(iVec3[(IOTA0 - iSlow65) & 1048575]));
+			fRec48[0] = ((iTemp50) ? fTemp11 : fRec48[1]);
+			fRec47[0] = ((iTemp50) ? 0.0f : std::min<float>(1.0f, fRec48[0] + fRec47[1]));
+			fRec49[0] = ((iTemp50) ? fTemp16 : fRec49[1]);
+			int iTemp51 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec47[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec49[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp52 = std::sin(3.1415927f * fRec47[0]);
+			int iTemp53 = static_cast<int>(fSlow66 * static_cast<float>(iVec3[(IOTA0 - iSlow68) & 1048575]));
+			fRec51[0] = ((iTemp53) ? fTemp11 : fRec51[1]);
+			fRec50[0] = ((iTemp53) ? 0.0f : std::min<float>(1.0f, fRec51[0] + fRec50[1]));
+			fRec52[0] = ((iTemp53) ? fTemp16 : fRec52[1]);
+			int iTemp54 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec50[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec52[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp55 = std::sin(3.1415927f * fRec50[0]);
+			int iTemp56 = static_cast<int>(fSlow69 * static_cast<float>(iVec3[(IOTA0 - iSlow71) & 1048575]));
+			fRec54[0] = ((iTemp56) ? fTemp11 : fRec54[1]);
+			fRec53[0] = ((iTemp56) ? 0.0f : std::min<float>(1.0f, fRec54[0] + fRec53[1]));
+			fRec55[0] = ((iTemp56) ? fTemp16 : fRec55[1]);
+			int iTemp57 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec53[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec55[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp58 = std::sin(3.1415927f * fRec53[0]);
+			int iTemp59 = static_cast<int>(fSlow72 * static_cast<float>(iVec3[(IOTA0 - iSlow74) & 1048575]));
+			fRec57[0] = ((iTemp59) ? fTemp11 : fRec57[1]);
+			fRec56[0] = ((iTemp59) ? 0.0f : std::min<float>(1.0f, fRec57[0] + fRec56[1]));
+			fRec58[0] = ((iTemp59) ? fTemp16 : fRec58[1]);
+			int iTemp60 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec56[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec58[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp61 = std::sin(3.1415927f * fRec56[0]);
+			int iTemp62 = static_cast<int>(fSlow75 * static_cast<float>(iVec3[(IOTA0 - iSlow77) & 1048575]));
+			fRec60[0] = ((iTemp62) ? fTemp11 : fRec60[1]);
+			fRec59[0] = ((iTemp62) ? 0.0f : std::min<float>(1.0f, fRec60[0] + fRec59[1]));
+			fRec61[0] = ((iTemp62) ? fTemp16 : fRec61[1]);
+			int iTemp63 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec59[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec61[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp64 = std::sin(3.1415927f * fRec59[0]);
+			int iTemp65 = static_cast<int>(fSlow78 * static_cast<float>(iVec3[(IOTA0 - iSlow80) & 1048575]));
+			fRec63[0] = ((iTemp65) ? fTemp11 : fRec63[1]);
+			fRec62[0] = ((iTemp65) ? 0.0f : std::min<float>(1.0f, fRec63[0] + fRec62[1]));
+			fRec64[0] = ((iTemp65) ? fTemp16 : fRec64[1]);
+			int iTemp66 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec62[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec64[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp67 = std::sin(3.1415927f * fRec62[0]);
+			int iTemp68 = static_cast<int>(fSlow81 * static_cast<float>(iVec3[(IOTA0 - iSlow83) & 1048575]));
+			fRec66[0] = ((iTemp68) ? fTemp11 : fRec66[1]);
+			fRec65[0] = ((iTemp68) ? 0.0f : std::min<float>(1.0f, fRec66[0] + fRec65[1]));
+			fRec67[0] = ((iTemp68) ? fTemp16 : fRec67[1]);
+			int iTemp69 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec65[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec67[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp70 = std::sin(3.1415927f * fRec65[0]);
+			int iTemp71 = static_cast<int>(fSlow84 * static_cast<float>(iVec3[(IOTA0 - iSlow86) & 1048575]));
+			fRec69[0] = ((iTemp71) ? fTemp11 : fRec69[1]);
+			fRec68[0] = ((iTemp71) ? 0.0f : std::min<float>(1.0f, fRec69[0] + fRec68[1]));
+			fRec70[0] = ((iTemp71) ? fTemp16 : fRec70[1]);
+			int iTemp72 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec68[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec70[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp73 = std::sin(3.1415927f * fRec68[0]);
+			int iTemp74 = static_cast<int>(fSlow87 * static_cast<float>(iVec3[(IOTA0 - iSlow89) & 1048575]));
+			fRec72[0] = ((iTemp74) ? fTemp11 : fRec72[1]);
+			fRec71[0] = ((iTemp74) ? 0.0f : std::min<float>(1.0f, fRec72[0] + fRec71[1]));
+			fRec73[0] = ((iTemp74) ? fTemp16 : fRec73[1]);
+			int iTemp75 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec71[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec73[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp76 = std::sin(3.1415927f * fRec71[0]);
+			int iTemp77 = static_cast<int>(fSlow90 * static_cast<float>(iVec3[(IOTA0 - iSlow92) & 1048575]));
+			fRec75[0] = ((iTemp77) ? fTemp11 : fRec75[1]);
+			fRec74[0] = ((iTemp77) ? 0.0f : std::min<float>(1.0f, fRec75[0] + fRec74[1]));
+			fRec76[0] = ((iTemp77) ? fTemp16 : fRec76[1]);
+			int iTemp78 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec74[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec76[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp79 = std::sin(3.1415927f * fRec74[0]);
+			int iTemp80 = static_cast<int>(fSlow93 * static_cast<float>(iVec3[(IOTA0 - iSlow95) & 1048575]));
+			fRec78[0] = ((iTemp80) ? fTemp11 : fRec78[1]);
+			fRec77[0] = ((iTemp80) ? 0.0f : std::min<float>(1.0f, fRec78[0] + fRec77[1]));
+			fRec79[0] = ((iTemp80) ? fTemp16 : fRec79[1]);
+			int iTemp81 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec77[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec79[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp82 = std::sin(3.1415927f * fRec77[0]);
+			int iTemp83 = static_cast<int>(fSlow96 * static_cast<float>(iVec3[(IOTA0 - iSlow98) & 1048575]));
+			fRec81[0] = ((iTemp83) ? fTemp11 : fRec81[1]);
+			fRec80[0] = ((iTemp83) ? 0.0f : std::min<float>(1.0f, fRec81[0] + fRec80[1]));
+			fRec82[0] = ((iTemp83) ? fTemp16 : fRec82[1]);
+			int iTemp84 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec80[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec82[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp85 = std::sin(3.1415927f * fRec80[0]);
+			int iTemp86 = static_cast<int>(fSlow99 * static_cast<float>(iVec3[(IOTA0 - iSlow101) & 1048575]));
+			fRec84[0] = ((iTemp86) ? fTemp11 : fRec84[1]);
+			fRec83[0] = ((iTemp86) ? 0.0f : std::min<float>(1.0f, fRec84[0] + fRec83[1]));
+			fRec85[0] = ((iTemp86) ? fTemp16 : fRec85[1]);
+			int iTemp87 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec83[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec85[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp88 = std::sin(3.1415927f * fRec83[0]);
+			int iTemp89 = static_cast<int>(fSlow102 * static_cast<float>(iVec3[(IOTA0 - iSlow104) & 1048575]));
+			fRec87[0] = ((iTemp89) ? fTemp11 : fRec87[1]);
+			fRec86[0] = ((iTemp89) ? 0.0f : std::min<float>(1.0f, fRec87[0] + fRec86[1]));
+			fRec88[0] = ((iTemp89) ? fTemp16 : fRec88[1]);
+			int iTemp90 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec86[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec88[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp91 = std::sin(3.1415927f * fRec86[0]);
+			int iTemp92 = static_cast<int>(fSlow105 * static_cast<float>(iVec3[(IOTA0 - iSlow107) & 1048575]));
+			fRec90[0] = ((iTemp92) ? fTemp11 : fRec90[1]);
+			fRec89[0] = ((iTemp92) ? 0.0f : std::min<float>(1.0f, fRec90[0] + fRec89[1]));
+			fRec91[0] = ((iTemp92) ? fTemp16 : fRec91[1]);
+			int iTemp93 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec89[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec91[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp94 = std::sin(3.1415927f * fRec89[0]);
+			int iTemp95 = static_cast<int>(fSlow108 * static_cast<float>(iVec3[(IOTA0 - iSlow110) & 1048575]));
+			fRec93[0] = ((iTemp95) ? fTemp11 : fRec93[1]);
+			fRec92[0] = ((iTemp95) ? 0.0f : std::min<float>(1.0f, fRec93[0] + fRec92[1]));
+			fRec94[0] = ((iTemp95) ? fTemp16 : fRec94[1]);
+			int iTemp96 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec92[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec94[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp97 = std::sin(3.1415927f * fRec92[0]);
+			int iTemp98 = static_cast<int>(fSlow111 * static_cast<float>(iVec3[(IOTA0 - iSlow113) & 1048575]));
+			fRec96[0] = ((iTemp98) ? fTemp11 : fRec96[1]);
+			fRec95[0] = ((iTemp98) ? 0.0f : std::min<float>(1.0f, fRec96[0] + fRec95[1]));
+			fRec97[0] = ((iTemp98) ? fTemp16 : fRec97[1]);
+			int iTemp99 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec95[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec97[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp100 = std::sin(3.1415927f * fRec95[0]);
+			int iTemp101 = static_cast<int>(fSlow114 * static_cast<float>(iVec3[(IOTA0 - iSlow116) & 1048575]));
+			fRec99[0] = ((iTemp101) ? fTemp11 : fRec99[1]);
+			fRec98[0] = ((iTemp101) ? 0.0f : std::min<float>(1.0f, fRec99[0] + fRec98[1]));
+			fRec100[0] = ((iTemp101) ? fTemp16 : fRec100[1]);
+			int iTemp102 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec98[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec100[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp103 = std::sin(3.1415927f * fRec98[0]);
+			int iTemp104 = static_cast<int>(fSlow117 * static_cast<float>(iVec3[(IOTA0 - iSlow119) & 1048575]));
+			fRec102[0] = ((iTemp104) ? fTemp11 : fRec102[1]);
+			fRec101[0] = ((iTemp104) ? 0.0f : std::min<float>(1.0f, fRec102[0] + fRec101[1]));
+			fRec103[0] = ((iTemp104) ? fTemp16 : fRec103[1]);
+			int iTemp105 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec101[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec103[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp106 = std::sin(3.1415927f * fRec101[0]);
+			int iTemp107 = static_cast<int>(fSlow120 * static_cast<float>(iVec3[(IOTA0 - iSlow122) & 1048575]));
+			fRec105[0] = ((iTemp107) ? fTemp11 : fRec105[1]);
+			fRec104[0] = ((iTemp107) ? 0.0f : std::min<float>(1.0f, fRec105[0] + fRec104[1]));
+			fRec106[0] = ((iTemp107) ? fTemp16 : fRec106[1]);
+			int iTemp108 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec104[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec106[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp109 = std::sin(3.1415927f * fRec104[0]);
+			int iTemp110 = static_cast<int>(fSlow123 * static_cast<float>(iVec3[(IOTA0 - iSlow125) & 1048575]));
+			fRec108[0] = ((iTemp110) ? fTemp11 : fRec108[1]);
+			fRec107[0] = ((iTemp110) ? 0.0f : std::min<float>(1.0f, fRec108[0] + fRec107[1]));
+			fRec109[0] = ((iTemp110) ? fTemp16 : fRec109[1]);
+			int iTemp111 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec107[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec109[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp112 = std::sin(3.1415927f * fRec107[0]);
+			int iTemp113 = static_cast<int>(fSlow126 * static_cast<float>(iVec3[(IOTA0 - iSlow128) & 1048575]));
+			fRec111[0] = ((iTemp113) ? fTemp11 : fRec111[1]);
+			fRec110[0] = ((iTemp113) ? 0.0f : std::min<float>(1.0f, fRec111[0] + fRec110[1]));
+			fRec112[0] = ((iTemp113) ? fTemp16 : fRec112[1]);
+			int iTemp114 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec110[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec112[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp115 = std::sin(3.1415927f * fRec110[0]);
+			int iTemp116 = static_cast<int>(fSlow129 * static_cast<float>(iVec3[(IOTA0 - iSlow131) & 1048575]));
+			fRec114[0] = ((iTemp116) ? fTemp11 : fRec114[1]);
+			fRec113[0] = ((iTemp116) ? 0.0f : std::min<float>(1.0f, fRec114[0] + fRec113[1]));
+			fRec115[0] = ((iTemp116) ? fTemp16 : fRec115[1]);
+			int iTemp117 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec113[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec115[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp118 = std::sin(3.1415927f * fRec113[0]);
+			int iTemp119 = static_cast<int>(fSlow132 * static_cast<float>(iVec3[(IOTA0 - iSlow134) & 1048575]));
+			fRec117[0] = ((iTemp119) ? fTemp11 : fRec117[1]);
+			fRec116[0] = ((iTemp119) ? 0.0f : std::min<float>(1.0f, fRec117[0] + fRec116[1]));
+			fRec118[0] = ((iTemp119) ? fTemp16 : fRec118[1]);
+			int iTemp120 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec116[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec118[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp121 = std::sin(3.1415927f * fRec116[0]);
+			int iTemp122 = static_cast<int>(fSlow135 * static_cast<float>(iVec3[(IOTA0 - iSlow137) & 1048575]));
+			fRec120[0] = ((iTemp122) ? fTemp11 : fRec120[1]);
+			fRec119[0] = ((iTemp122) ? 0.0f : std::min<float>(1.0f, fRec120[0] + fRec119[1]));
+			fRec121[0] = ((iTemp122) ? fTemp16 : fRec121[1]);
+			int iTemp123 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec119[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec121[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp124 = std::sin(3.1415927f * fRec119[0]);
+			int iTemp125 = static_cast<int>(fSlow138 * static_cast<float>(iVec3[(IOTA0 - iSlow140) & 1048575]));
+			fRec123[0] = ((iTemp125) ? fTemp11 : fRec123[1]);
+			fRec122[0] = ((iTemp125) ? 0.0f : std::min<float>(1.0f, fRec123[0] + fRec122[1]));
+			fRec124[0] = ((iTemp125) ? fTemp16 : fRec124[1]);
+			int iTemp126 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec122[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec124[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp127 = std::sin(3.1415927f * fRec122[0]);
+			int iTemp128 = static_cast<int>(fSlow141 * static_cast<float>(iVec3[(IOTA0 - iSlow143) & 1048575]));
+			fRec126[0] = ((iTemp128) ? fTemp11 : fRec126[1]);
+			fRec125[0] = ((iTemp128) ? 0.0f : std::min<float>(1.0f, fRec126[0] + fRec125[1]));
+			fRec127[0] = ((iTemp128) ? fTemp16 : fRec127[1]);
+			int iTemp129 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec125[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec127[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp130 = std::sin(3.1415927f * fRec125[0]);
+			int iTemp131 = static_cast<int>(fSlow144 * static_cast<float>(iVec3[(IOTA0 - iSlow146) & 1048575]));
+			fRec129[0] = ((iTemp131) ? fTemp11 : fRec129[1]);
+			fRec128[0] = ((iTemp131) ? 0.0f : std::min<float>(1.0f, fRec129[0] + fRec128[1]));
+			fRec130[0] = ((iTemp131) ? fTemp16 : fRec130[1]);
+			int iTemp132 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec128[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec130[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp133 = std::sin(3.1415927f * fRec128[0]);
+			int iTemp134 = static_cast<int>(fSlow147 * static_cast<float>(iVec3[(IOTA0 - iSlow149) & 1048575]));
+			fRec132[0] = ((iTemp134) ? fTemp11 : fRec132[1]);
+			fRec131[0] = ((iTemp134) ? 0.0f : std::min<float>(1.0f, fRec132[0] + fRec131[1]));
+			fRec133[0] = ((iTemp134) ? fTemp16 : fRec133[1]);
+			int iTemp135 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec131[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec133[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp136 = std::sin(3.1415927f * fRec131[0]);
+			int iTemp137 = static_cast<int>(fSlow150 * static_cast<float>(iVec3[(IOTA0 - iSlow152) & 1048575]));
+			fRec135[0] = ((iTemp137) ? fTemp11 : fRec135[1]);
+			fRec134[0] = ((iTemp137) ? 0.0f : std::min<float>(1.0f, fRec135[0] + fRec134[1]));
+			fRec136[0] = ((iTemp137) ? fTemp16 : fRec136[1]);
+			int iTemp138 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec134[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec136[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp139 = std::sin(3.1415927f * fRec134[0]);
+			int iTemp140 = static_cast<int>(fSlow153 * static_cast<float>(iVec3[(IOTA0 - iSlow155) & 1048575]));
+			fRec138[0] = ((iTemp140) ? fTemp11 : fRec138[1]);
+			fRec137[0] = ((iTemp140) ? 0.0f : std::min<float>(1.0f, fRec138[0] + fRec137[1]));
+			fRec139[0] = ((iTemp140) ? fTemp16 : fRec139[1]);
+			int iTemp141 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec137[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec139[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp142 = std::sin(3.1415927f * fRec137[0]);
+			int iTemp143 = static_cast<int>(fSlow156 * static_cast<float>(iVec3[(IOTA0 - iSlow158) & 1048575]));
+			fRec141[0] = ((iTemp143) ? fTemp11 : fRec141[1]);
+			fRec140[0] = ((iTemp143) ? 0.0f : std::min<float>(1.0f, fRec141[0] + fRec140[1]));
+			fRec142[0] = ((iTemp143) ? fTemp16 : fRec142[1]);
+			int iTemp144 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec140[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec142[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp145 = std::sin(3.1415927f * fRec140[0]);
+			int iTemp146 = static_cast<int>(fSlow159 * static_cast<float>(iVec3[(IOTA0 - iSlow161) & 1048575]));
+			fRec144[0] = ((iTemp146) ? fTemp11 : fRec144[1]);
+			fRec143[0] = ((iTemp146) ? 0.0f : std::min<float>(1.0f, fRec144[0] + fRec143[1]));
+			fRec145[0] = ((iTemp146) ? fTemp16 : fRec145[1]);
+			int iTemp147 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec143[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec145[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp148 = std::sin(3.1415927f * fRec143[0]);
+			int iTemp149 = static_cast<int>(fSlow162 * static_cast<float>(iVec3[(IOTA0 - iSlow164) & 1048575]));
+			fRec147[0] = ((iTemp149) ? fTemp11 : fRec147[1]);
+			fRec146[0] = ((iTemp149) ? 0.0f : std::min<float>(1.0f, fRec147[0] + fRec146[1]));
+			fRec148[0] = ((iTemp149) ? fTemp16 : fRec148[1]);
+			int iTemp150 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec146[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec148[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp151 = std::sin(3.1415927f * fRec146[0]);
+			int iTemp152 = static_cast<int>(fSlow165 * static_cast<float>(iVec3[(IOTA0 - iSlow167) & 1048575]));
+			fRec150[0] = ((iTemp152) ? fTemp11 : fRec150[1]);
+			fRec149[0] = ((iTemp152) ? 0.0f : std::min<float>(1.0f, fRec150[0] + fRec149[1]));
+			fRec151[0] = ((iTemp152) ? fTemp16 : fRec151[1]);
+			int iTemp153 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec149[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec151[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp154 = std::sin(3.1415927f * fRec149[0]);
+			int iTemp155 = static_cast<int>(fSlow168 * static_cast<float>(iVec3[(IOTA0 - iSlow170) & 1048575]));
+			fRec153[0] = ((iTemp155) ? fTemp11 : fRec153[1]);
+			fRec152[0] = ((iTemp155) ? 0.0f : std::min<float>(1.0f, fRec153[0] + fRec152[1]));
+			fRec154[0] = ((iTemp155) ? fTemp16 : fRec154[1]);
+			int iTemp156 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec152[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec154[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp157 = std::sin(3.1415927f * fRec152[0]);
+			int iTemp158 = static_cast<int>(fSlow171 * static_cast<float>(iVec3[(IOTA0 - iSlow173) & 1048575]));
+			fRec156[0] = ((iTemp158) ? fTemp11 : fRec156[1]);
+			fRec155[0] = ((iTemp158) ? 0.0f : std::min<float>(1.0f, fRec156[0] + fRec155[1]));
+			fRec157[0] = ((iTemp158) ? fTemp16 : fRec157[1]);
+			int iTemp159 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec155[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec157[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp160 = std::sin(3.1415927f * fRec155[0]);
+			int iTemp161 = static_cast<int>(fSlow174 * static_cast<float>(iVec3[(IOTA0 - iSlow176) & 1048575]));
+			fRec159[0] = ((iTemp161) ? fTemp11 : fRec159[1]);
+			fRec158[0] = ((iTemp161) ? 0.0f : std::min<float>(1.0f, fRec159[0] + fRec158[1]));
+			fRec160[0] = ((iTemp161) ? fTemp16 : fRec160[1]);
+			int iTemp162 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec158[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec160[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp163 = std::sin(3.1415927f * fRec158[0]);
+			int iTemp164 = static_cast<int>(fSlow177 * static_cast<float>(iVec3[(IOTA0 - iSlow179) & 1048575]));
+			fRec162[0] = ((iTemp164) ? fTemp11 : fRec162[1]);
+			fRec161[0] = ((iTemp164) ? 0.0f : std::min<float>(1.0f, fRec162[0] + fRec161[1]));
+			fRec163[0] = ((iTemp164) ? fTemp16 : fRec163[1]);
+			int iTemp165 = static_cast<int>(std::max<float>(0.0f, std::min<float>(std::fmod(fSlow11 + std::fmod(fSlow13 * fRec3[0] * fRec161[0] * fTemp10 + fSlow10 * std::fmod(std::fmod(fTemp17 + fTemp13 * (fRec11[0] + fRec163[0]), 1.0f) + 1.0f, 1.0f), fSlow11), fSlow11), fSlow29)));
+			float fTemp166 = std::sin(3.1415927f * fRec161[0]);
+			float fTemp167 = fSlow0 * fRec1[0] * (fSoundfile0ca_bu_ch0[fSoundfile0ca_of0[0] + iTemp18] * fTemp19 + fSoundfile0ca_bu_ch1[fSoundfile0ca_of1[0] + iTemp21] * fTemp22 + fSoundfile0ca_bu_ch2[fSoundfile0ca_of2[0] + iTemp24] * fTemp25 + fSoundfile0ca_bu_ch3[fSoundfile0ca_of3[0] + iTemp27] * fTemp28 + fSoundfile0ca_bu_ch4[fSoundfile0ca_of4[0] + iTemp30] * fTemp31 + fSoundfile0ca_bu_ch5[fSoundfile0ca_of5[0] + iTemp33] * fTemp34 + fSoundfile0ca_bu_ch6[fSoundfile0ca_of6[0] + iTemp36] * fTemp37 + fSoundfile0ca_bu_ch7[fSoundfile0ca_of7[0] + iTemp39] * fTemp40 + fSoundfile0ca_bu_ch8[fSoundfile0ca_of8[0] + iTemp42] * fTemp43 + fSoundfile0ca_bu_ch9[fSoundfile0ca_of9[0] + iTemp45] * fTemp46 + fSoundfile0ca_bu_ch10[fSoundfile0ca_of10[0] + iTemp48] * fTemp49 + fSoundfile0ca_bu_ch11[fSoundfile0ca_of11[0] + iTemp51] * fTemp52 + fSoundfile0ca_bu_ch12[fSoundfile0ca_of12[0] + iTemp54] * fTemp55 + fSoundfile0ca_bu_ch13[fSoundfile0ca_of13[0] + iTemp57] * fTemp58 + fSoundfile0ca_bu_ch14[fSoundfile0ca_of14[0] + iTemp60] * fTemp61 + fSoundfile0ca_bu_ch15[fSoundfile0ca_of15[0] + iTemp63] * fTemp64 + fSoundfile0ca_bu_ch16[fSoundfile0ca_of16[0] + iTemp66] * fTemp67 + fSoundfile0ca_bu_ch17[fSoundfile0ca_of17[0] + iTemp69] * fTemp70 + fSoundfile0ca_bu_ch18[fSoundfile0ca_of18[0] + iTemp72] * fTemp73 + fSoundfile0ca_bu_ch19[fSoundfile0ca_of19[0] + iTemp75] * fTemp76 + fSoundfile0ca_bu_ch20[fSoundfile0ca_of20[0] + iTemp78] * fTemp79 + fSoundfile0ca_bu_ch21[fSoundfile0ca_of21[0] + iTemp81] * fTemp82 + fSoundfile0ca_bu_ch22[fSoundfile0ca_of22[0] + iTemp84] * fTemp85 + fSoundfile0ca_bu_ch23[fSoundfile0ca_of23[0] + iTemp87] * fTemp88 + fSoundfile0ca_bu_ch24[fSoundfile0ca_of24[0] + iTemp90] * fTemp91 + fSoundfile0ca_bu_ch25[fSoundfile0ca_of25[0] + iTemp93] * fTemp94 + fSoundfile0ca_bu_ch26[fSoundfile0ca_of26[0] + iTemp96] * fTemp97 + fSoundfile0ca_bu_ch27[fSoundfile0ca_of27[0] + iTemp99] * fTemp100 + fSoundfile0ca_bu_ch28[fSoundfile0ca_of28[0] + iTemp102] * fTemp103 + fSoundfile0ca_bu_ch29[fSoundfile0ca_of29[0] + iTemp105] * fTemp106 + fSoundfile0ca_bu_ch30[fSoundfile0ca_of30[0] + iTemp108] * fTemp109 + fSoundfile0ca_bu_ch31[fSoundfile0ca_of31[0] + iTemp111] * fTemp112 + fSoundfile0ca_bu_ch32[fSoundfile0ca_of32[0] + iTemp114] * fTemp115 + fSoundfile0ca_bu_ch33[fSoundfile0ca_of33[0] + iTemp117] * fTemp118 + fSoundfile0ca_bu_ch34[fSoundfile0ca_of34[0] + iTemp120] * fTemp121 + fSoundfile0ca_bu_ch35[fSoundfile0ca_of35[0] + iTemp123] * fTemp124 + fSoundfile0ca_bu_ch36[fSoundfile0ca_of36[0] + iTemp126] * fTemp127 + fSoundfile0ca_bu_ch37[fSoundfile0ca_of37[0] + iTemp129] * fTemp130 + fSoundfile0ca_bu_ch38[fSoundfile0ca_of38[0] + iTemp132] * fTemp133 + fSoundfile0ca_bu_ch39[fSoundfile0ca_of39[0] + iTemp135] * fTemp136 + fSoundfile0ca_bu_ch40[fSoundfile0ca_of40[0] + iTemp138] * fTemp139 + fSoundfile0ca_bu_ch41[fSoundfile0ca_of41[0] + iTemp141] * fTemp142 + fSoundfile0ca_bu_ch42[fSoundfile0ca_of42[0] + iTemp144] * fTemp145 + fSoundfile0ca_bu_ch43[fSoundfile0ca_of43[0] + iTemp147] * fTemp148 + fSoundfile0ca_bu_ch44[fSoundfile0ca_of44[0] + iTemp150] * fTemp151 + fSoundfile0ca_bu_ch45[fSoundfile0ca_of45[0] + iTemp153] * fTemp154 + fSoundfile0ca_bu_ch46[fSoundfile0ca_of46[0] + iTemp156] * fTemp157 + fSoundfile0ca_bu_ch47[fSoundfile0ca_of47[0] + iTemp159] * fTemp160 + fSoundfile0ca_bu_ch48[fSoundfile0ca_of48[0] + iTemp162] * fTemp163 + fSoundfile0ca_bu_ch49[fSoundfile0ca_of49[0] + iTemp165] * fTemp166);
+			fVec5[0] = fTemp167;
+			fRec0[0] = 0.995f * fRec0[1] + fTemp167 - fVec5[1];
 			output0[i0] = static_cast<FAUSTFLOAT>(std::min<float>(1.0f, std::max<float>(-1.0f, fRec0[0])));
-			float fTemp269 = fSlow0 * fRec1[0] * (fTemp22 * fSoundfile0ca_bu_ch50[fSoundfile0ca_of50[0] + iTemp20] + fTemp27 * fSoundfile0ca_bu_ch51[fSoundfile0ca_of51[0] + iTemp26] + fTemp32 * fSoundfile0ca_bu_ch52[fSoundfile0ca_of52[0] + iTemp31] + fTemp37 * fSoundfile0ca_bu_ch53[fSoundfile0ca_of53[0] + iTemp36] + fTemp42 * fSoundfile0ca_bu_ch54[fSoundfile0ca_of54[0] + iTemp41] + fTemp47 * fSoundfile0ca_bu_ch55[fSoundfile0ca_of55[0] + iTemp46] + fTemp52 * fSoundfile0ca_bu_ch56[fSoundfile0ca_of56[0] + iTemp51] + fTemp57 * fSoundfile0ca_bu_ch57[fSoundfile0ca_of57[0] + iTemp56] + fTemp62 * fSoundfile0ca_bu_ch58[fSoundfile0ca_of58[0] + iTemp61] + fTemp67 * fSoundfile0ca_bu_ch59[fSoundfile0ca_of59[0] + iTemp66] + fTemp72 * fSoundfile0ca_bu_ch60[fSoundfile0ca_of60[0] + iTemp71] + fTemp77 * fSoundfile0ca_bu_ch61[fSoundfile0ca_of61[0] + iTemp76] + fTemp82 * fSoundfile0ca_bu_ch62[fSoundfile0ca_of62[0] + iTemp81] + fTemp87 * fSoundfile0ca_bu_ch63[fSoundfile0ca_of63[0] + iTemp86] + fTemp92 * fSoundfile0ca_bu_ch64[fSoundfile0ca_of64[0] + iTemp91] + fTemp97 * fSoundfile0ca_bu_ch65[fSoundfile0ca_of65[0] + iTemp96] + fTemp102 * fSoundfile0ca_bu_ch66[fSoundfile0ca_of66[0] + iTemp101] + fTemp107 * fSoundfile0ca_bu_ch67[fSoundfile0ca_of67[0] + iTemp106] + fTemp112 * fSoundfile0ca_bu_ch68[fSoundfile0ca_of68[0] + iTemp111] + fTemp117 * fSoundfile0ca_bu_ch69[fSoundfile0ca_of69[0] + iTemp116] + fTemp122 * fSoundfile0ca_bu_ch70[fSoundfile0ca_of70[0] + iTemp121] + fTemp127 * fSoundfile0ca_bu_ch71[fSoundfile0ca_of71[0] + iTemp126] + fTemp132 * fSoundfile0ca_bu_ch72[fSoundfile0ca_of72[0] + iTemp131] + fTemp137 * fSoundfile0ca_bu_ch73[fSoundfile0ca_of73[0] + iTemp136] + fTemp142 * fSoundfile0ca_bu_ch74[fSoundfile0ca_of74[0] + iTemp141] + fTemp147 * fSoundfile0ca_bu_ch75[fSoundfile0ca_of75[0] + iTemp146] + fTemp152 * fSoundfile0ca_bu_ch76[fSoundfile0ca_of76[0] + iTemp151] + fTemp157 * fSoundfile0ca_bu_ch77[fSoundfile0ca_of77[0] + iTemp156] + fTemp162 * fSoundfile0ca_bu_ch78[fSoundfile0ca_of78[0] + iTemp161] + fTemp167 * fSoundfile0ca_bu_ch79[fSoundfile0ca_of79[0] + iTemp166] + fTemp172 * fSoundfile0ca_bu_ch80[fSoundfile0ca_of80[0] + iTemp171] + fTemp177 * fSoundfile0ca_bu_ch81[fSoundfile0ca_of81[0] + iTemp176] + fTemp182 * fSoundfile0ca_bu_ch82[fSoundfile0ca_of82[0] + iTemp181] + fTemp187 * fSoundfile0ca_bu_ch83[fSoundfile0ca_of83[0] + iTemp186] + fTemp192 * fSoundfile0ca_bu_ch84[fSoundfile0ca_of84[0] + iTemp191] + fTemp197 * fSoundfile0ca_bu_ch85[fSoundfile0ca_of85[0] + iTemp196] + fTemp202 * fSoundfile0ca_bu_ch86[fSoundfile0ca_of86[0] + iTemp201] + fTemp207 * fSoundfile0ca_bu_ch87[fSoundfile0ca_of87[0] + iTemp206] + fTemp212 * fSoundfile0ca_bu_ch88[fSoundfile0ca_of88[0] + iTemp211] + fTemp217 * fSoundfile0ca_bu_ch89[fSoundfile0ca_of89[0] + iTemp216] + fTemp222 * fSoundfile0ca_bu_ch90[fSoundfile0ca_of90[0] + iTemp221] + fTemp227 * fSoundfile0ca_bu_ch91[fSoundfile0ca_of91[0] + iTemp226] + fTemp232 * fSoundfile0ca_bu_ch92[fSoundfile0ca_of92[0] + iTemp231] + fTemp237 * fSoundfile0ca_bu_ch93[fSoundfile0ca_of93[0] + iTemp236] + fTemp242 * fSoundfile0ca_bu_ch94[fSoundfile0ca_of94[0] + iTemp241] + fTemp247 * fSoundfile0ca_bu_ch95[fSoundfile0ca_of95[0] + iTemp246] + fTemp252 * fSoundfile0ca_bu_ch96[fSoundfile0ca_of96[0] + iTemp251] + fTemp257 * fSoundfile0ca_bu_ch97[fSoundfile0ca_of97[0] + iTemp256] + fTemp262 * fSoundfile0ca_bu_ch98[fSoundfile0ca_of98[0] + iTemp261] + fTemp267 * fSoundfile0ca_bu_ch99[fSoundfile0ca_of99[0] + iTemp266]);
-			fVec6[0] = fTemp269;
-			fRec165[0] = 0.995f * fRec165[1] + fTemp269 - fVec6[1];
-			output1[i0] = static_cast<FAUSTFLOAT>(std::min<float>(1.0f, std::max<float>(-1.0f, fRec165[0])));
+			float fTemp168 = fSlow0 * fRec1[0] * (fTemp19 * fSoundfile0ca_bu_ch50[fSoundfile0ca_of50[0] + iTemp18] + fTemp22 * fSoundfile0ca_bu_ch51[fSoundfile0ca_of51[0] + iTemp21] + fTemp25 * fSoundfile0ca_bu_ch52[fSoundfile0ca_of52[0] + iTemp24] + fTemp28 * fSoundfile0ca_bu_ch53[fSoundfile0ca_of53[0] + iTemp27] + fTemp31 * fSoundfile0ca_bu_ch54[fSoundfile0ca_of54[0] + iTemp30] + fTemp34 * fSoundfile0ca_bu_ch55[fSoundfile0ca_of55[0] + iTemp33] + fTemp37 * fSoundfile0ca_bu_ch56[fSoundfile0ca_of56[0] + iTemp36] + fTemp40 * fSoundfile0ca_bu_ch57[fSoundfile0ca_of57[0] + iTemp39] + fTemp43 * fSoundfile0ca_bu_ch58[fSoundfile0ca_of58[0] + iTemp42] + fTemp46 * fSoundfile0ca_bu_ch59[fSoundfile0ca_of59[0] + iTemp45] + fTemp49 * fSoundfile0ca_bu_ch60[fSoundfile0ca_of60[0] + iTemp48] + fTemp52 * fSoundfile0ca_bu_ch61[fSoundfile0ca_of61[0] + iTemp51] + fTemp55 * fSoundfile0ca_bu_ch62[fSoundfile0ca_of62[0] + iTemp54] + fTemp58 * fSoundfile0ca_bu_ch63[fSoundfile0ca_of63[0] + iTemp57] + fTemp61 * fSoundfile0ca_bu_ch64[fSoundfile0ca_of64[0] + iTemp60] + fTemp64 * fSoundfile0ca_bu_ch65[fSoundfile0ca_of65[0] + iTemp63] + fTemp67 * fSoundfile0ca_bu_ch66[fSoundfile0ca_of66[0] + iTemp66] + fTemp70 * fSoundfile0ca_bu_ch67[fSoundfile0ca_of67[0] + iTemp69] + fTemp73 * fSoundfile0ca_bu_ch68[fSoundfile0ca_of68[0] + iTemp72] + fTemp76 * fSoundfile0ca_bu_ch69[fSoundfile0ca_of69[0] + iTemp75] + fTemp79 * fSoundfile0ca_bu_ch70[fSoundfile0ca_of70[0] + iTemp78] + fTemp82 * fSoundfile0ca_bu_ch71[fSoundfile0ca_of71[0] + iTemp81] + fTemp85 * fSoundfile0ca_bu_ch72[fSoundfile0ca_of72[0] + iTemp84] + fTemp88 * fSoundfile0ca_bu_ch73[fSoundfile0ca_of73[0] + iTemp87] + fTemp91 * fSoundfile0ca_bu_ch74[fSoundfile0ca_of74[0] + iTemp90] + fTemp94 * fSoundfile0ca_bu_ch75[fSoundfile0ca_of75[0] + iTemp93] + fTemp97 * fSoundfile0ca_bu_ch76[fSoundfile0ca_of76[0] + iTemp96] + fTemp100 * fSoundfile0ca_bu_ch77[fSoundfile0ca_of77[0] + iTemp99] + fTemp103 * fSoundfile0ca_bu_ch78[fSoundfile0ca_of78[0] + iTemp102] + fTemp106 * fSoundfile0ca_bu_ch79[fSoundfile0ca_of79[0] + iTemp105] + fTemp109 * fSoundfile0ca_bu_ch80[fSoundfile0ca_of80[0] + iTemp108] + fTemp112 * fSoundfile0ca_bu_ch81[fSoundfile0ca_of81[0] + iTemp111] + fTemp115 * fSoundfile0ca_bu_ch82[fSoundfile0ca_of82[0] + iTemp114] + fTemp118 * fSoundfile0ca_bu_ch83[fSoundfile0ca_of83[0] + iTemp117] + fTemp121 * fSoundfile0ca_bu_ch84[fSoundfile0ca_of84[0] + iTemp120] + fTemp124 * fSoundfile0ca_bu_ch85[fSoundfile0ca_of85[0] + iTemp123] + fTemp127 * fSoundfile0ca_bu_ch86[fSoundfile0ca_of86[0] + iTemp126] + fTemp130 * fSoundfile0ca_bu_ch87[fSoundfile0ca_of87[0] + iTemp129] + fTemp133 * fSoundfile0ca_bu_ch88[fSoundfile0ca_of88[0] + iTemp132] + fTemp136 * fSoundfile0ca_bu_ch89[fSoundfile0ca_of89[0] + iTemp135] + fTemp139 * fSoundfile0ca_bu_ch90[fSoundfile0ca_of90[0] + iTemp138] + fTemp142 * fSoundfile0ca_bu_ch91[fSoundfile0ca_of91[0] + iTemp141] + fTemp145 * fSoundfile0ca_bu_ch92[fSoundfile0ca_of92[0] + iTemp144] + fTemp148 * fSoundfile0ca_bu_ch93[fSoundfile0ca_of93[0] + iTemp147] + fTemp151 * fSoundfile0ca_bu_ch94[fSoundfile0ca_of94[0] + iTemp150] + fTemp154 * fSoundfile0ca_bu_ch95[fSoundfile0ca_of95[0] + iTemp153] + fTemp157 * fSoundfile0ca_bu_ch96[fSoundfile0ca_of96[0] + iTemp156] + fTemp160 * fSoundfile0ca_bu_ch97[fSoundfile0ca_of97[0] + iTemp159] + fTemp163 * fSoundfile0ca_bu_ch98[fSoundfile0ca_of98[0] + iTemp162] + fTemp166 * fSoundfile0ca_bu_ch99[fSoundfile0ca_of99[0] + iTemp165]);
+			fVec6[0] = fTemp168;
+			fRec164[0] = 0.995f * fRec164[1] + fTemp168 - fVec6[1];
+			output1[i0] = static_cast<FAUSTFLOAT>(std::min<float>(1.0f, std::max<float>(-1.0f, fRec164[0])));
 			iVec0[1] = iVec0[0];
 			IOTA0 = IOTA0 + 1;
 			iVec2[1] = iVec2[0];
 			iRec2[1] = iRec2[0];
 			fRec1[1] = fRec1[0];
-			fRec4[1] = fRec4[0];
-			fRec6[1] = fRec6[0];
-			fRec5[1] = fRec5[0];
 			fRec3[1] = fRec3[0];
+			fRec5[1] = fRec5[0];
 			fRec8[1] = fRec8[0];
 			fRec9[1] = fRec9[0];
 			fRec7[1] = fRec7[0];
+			fRec6[1] = fRec6[0];
+			fRec4[1] = fRec4[0];
 			fRec10[1] = fRec10[0];
-			fRec14[1] = fRec14[0];
-			fRec12[1] = fRec12[0];
 			fRec11[1] = fRec11[0];
 			fRec15[1] = fRec15[0];
-			fRec17[1] = fRec17[0];
+			fRec13[1] = fRec13[0];
+			fRec12[1] = fRec12[0];
 			fRec16[1] = fRec16[0];
-			fRec19[1] = fRec19[0];
 			fRec18[1] = fRec18[0];
+			fRec17[1] = fRec17[0];
+			fRec19[1] = fRec19[0];
+			fRec21[1] = fRec21[0];
 			fRec20[1] = fRec20[0];
 			fRec22[1] = fRec22[0];
-			fRec21[1] = fRec21[0];
+			fRec24[1] = fRec24[0];
 			fRec23[1] = fRec23[0];
 			fRec25[1] = fRec25[0];
-			fRec24[1] = fRec24[0];
+			fRec27[1] = fRec27[0];
 			fRec26[1] = fRec26[0];
 			fRec28[1] = fRec28[0];
-			fRec27[1] = fRec27[0];
+			fRec30[1] = fRec30[0];
 			fRec29[1] = fRec29[0];
 			fRec31[1] = fRec31[0];
-			fRec30[1] = fRec30[0];
+			fRec33[1] = fRec33[0];
 			fRec32[1] = fRec32[0];
 			fRec34[1] = fRec34[0];
-			fRec33[1] = fRec33[0];
+			fRec36[1] = fRec36[0];
 			fRec35[1] = fRec35[0];
 			fRec37[1] = fRec37[0];
-			fRec36[1] = fRec36[0];
+			fRec39[1] = fRec39[0];
 			fRec38[1] = fRec38[0];
 			fRec40[1] = fRec40[0];
-			fRec39[1] = fRec39[0];
+			fRec42[1] = fRec42[0];
 			fRec41[1] = fRec41[0];
 			fRec43[1] = fRec43[0];
-			fRec42[1] = fRec42[0];
+			fRec45[1] = fRec45[0];
 			fRec44[1] = fRec44[0];
 			fRec46[1] = fRec46[0];
-			fRec45[1] = fRec45[0];
+			fRec48[1] = fRec48[0];
 			fRec47[1] = fRec47[0];
 			fRec49[1] = fRec49[0];
-			fRec48[1] = fRec48[0];
+			fRec51[1] = fRec51[0];
 			fRec50[1] = fRec50[0];
 			fRec52[1] = fRec52[0];
-			fRec51[1] = fRec51[0];
+			fRec54[1] = fRec54[0];
 			fRec53[1] = fRec53[0];
 			fRec55[1] = fRec55[0];
-			fRec54[1] = fRec54[0];
+			fRec57[1] = fRec57[0];
 			fRec56[1] = fRec56[0];
 			fRec58[1] = fRec58[0];
-			fRec57[1] = fRec57[0];
+			fRec60[1] = fRec60[0];
 			fRec59[1] = fRec59[0];
 			fRec61[1] = fRec61[0];
-			fRec60[1] = fRec60[0];
+			fRec63[1] = fRec63[0];
 			fRec62[1] = fRec62[0];
 			fRec64[1] = fRec64[0];
-			fRec63[1] = fRec63[0];
+			fRec66[1] = fRec66[0];
 			fRec65[1] = fRec65[0];
 			fRec67[1] = fRec67[0];
-			fRec66[1] = fRec66[0];
+			fRec69[1] = fRec69[0];
 			fRec68[1] = fRec68[0];
 			fRec70[1] = fRec70[0];
-			fRec69[1] = fRec69[0];
+			fRec72[1] = fRec72[0];
 			fRec71[1] = fRec71[0];
 			fRec73[1] = fRec73[0];
-			fRec72[1] = fRec72[0];
+			fRec75[1] = fRec75[0];
 			fRec74[1] = fRec74[0];
 			fRec76[1] = fRec76[0];
-			fRec75[1] = fRec75[0];
+			fRec78[1] = fRec78[0];
 			fRec77[1] = fRec77[0];
 			fRec79[1] = fRec79[0];
-			fRec78[1] = fRec78[0];
+			fRec81[1] = fRec81[0];
 			fRec80[1] = fRec80[0];
 			fRec82[1] = fRec82[0];
-			fRec81[1] = fRec81[0];
+			fRec84[1] = fRec84[0];
 			fRec83[1] = fRec83[0];
 			fRec85[1] = fRec85[0];
-			fRec84[1] = fRec84[0];
+			fRec87[1] = fRec87[0];
 			fRec86[1] = fRec86[0];
 			fRec88[1] = fRec88[0];
-			fRec87[1] = fRec87[0];
+			fRec90[1] = fRec90[0];
 			fRec89[1] = fRec89[0];
 			fRec91[1] = fRec91[0];
-			fRec90[1] = fRec90[0];
+			fRec93[1] = fRec93[0];
 			fRec92[1] = fRec92[0];
 			fRec94[1] = fRec94[0];
-			fRec93[1] = fRec93[0];
+			fRec96[1] = fRec96[0];
 			fRec95[1] = fRec95[0];
 			fRec97[1] = fRec97[0];
-			fRec96[1] = fRec96[0];
+			fRec99[1] = fRec99[0];
 			fRec98[1] = fRec98[0];
 			fRec100[1] = fRec100[0];
-			fRec99[1] = fRec99[0];
+			fRec102[1] = fRec102[0];
 			fRec101[1] = fRec101[0];
 			fRec103[1] = fRec103[0];
-			fRec102[1] = fRec102[0];
+			fRec105[1] = fRec105[0];
 			fRec104[1] = fRec104[0];
 			fRec106[1] = fRec106[0];
-			fRec105[1] = fRec105[0];
+			fRec108[1] = fRec108[0];
 			fRec107[1] = fRec107[0];
 			fRec109[1] = fRec109[0];
-			fRec108[1] = fRec108[0];
+			fRec111[1] = fRec111[0];
 			fRec110[1] = fRec110[0];
 			fRec112[1] = fRec112[0];
-			fRec111[1] = fRec111[0];
+			fRec114[1] = fRec114[0];
 			fRec113[1] = fRec113[0];
 			fRec115[1] = fRec115[0];
-			fRec114[1] = fRec114[0];
+			fRec117[1] = fRec117[0];
 			fRec116[1] = fRec116[0];
 			fRec118[1] = fRec118[0];
-			fRec117[1] = fRec117[0];
+			fRec120[1] = fRec120[0];
 			fRec119[1] = fRec119[0];
 			fRec121[1] = fRec121[0];
-			fRec120[1] = fRec120[0];
+			fRec123[1] = fRec123[0];
 			fRec122[1] = fRec122[0];
 			fRec124[1] = fRec124[0];
-			fRec123[1] = fRec123[0];
+			fRec126[1] = fRec126[0];
 			fRec125[1] = fRec125[0];
 			fRec127[1] = fRec127[0];
-			fRec126[1] = fRec126[0];
+			fRec129[1] = fRec129[0];
 			fRec128[1] = fRec128[0];
 			fRec130[1] = fRec130[0];
-			fRec129[1] = fRec129[0];
+			fRec132[1] = fRec132[0];
 			fRec131[1] = fRec131[0];
 			fRec133[1] = fRec133[0];
-			fRec132[1] = fRec132[0];
+			fRec135[1] = fRec135[0];
 			fRec134[1] = fRec134[0];
 			fRec136[1] = fRec136[0];
-			fRec135[1] = fRec135[0];
+			fRec138[1] = fRec138[0];
 			fRec137[1] = fRec137[0];
 			fRec139[1] = fRec139[0];
-			fRec138[1] = fRec138[0];
+			fRec141[1] = fRec141[0];
 			fRec140[1] = fRec140[0];
 			fRec142[1] = fRec142[0];
-			fRec141[1] = fRec141[0];
+			fRec144[1] = fRec144[0];
 			fRec143[1] = fRec143[0];
 			fRec145[1] = fRec145[0];
-			fRec144[1] = fRec144[0];
+			fRec147[1] = fRec147[0];
 			fRec146[1] = fRec146[0];
 			fRec148[1] = fRec148[0];
-			fRec147[1] = fRec147[0];
+			fRec150[1] = fRec150[0];
 			fRec149[1] = fRec149[0];
 			fRec151[1] = fRec151[0];
-			fRec150[1] = fRec150[0];
+			fRec153[1] = fRec153[0];
 			fRec152[1] = fRec152[0];
 			fRec154[1] = fRec154[0];
-			fRec153[1] = fRec153[0];
+			fRec156[1] = fRec156[0];
 			fRec155[1] = fRec155[0];
 			fRec157[1] = fRec157[0];
-			fRec156[1] = fRec156[0];
+			fRec159[1] = fRec159[0];
 			fRec158[1] = fRec158[0];
 			fRec160[1] = fRec160[0];
-			fRec159[1] = fRec159[0];
+			fRec162[1] = fRec162[0];
 			fRec161[1] = fRec161[0];
 			fRec163[1] = fRec163[0];
-			fRec162[1] = fRec162[0];
-			fRec164[1] = fRec164[0];
 			fVec5[1] = fVec5[0];
 			fRec0[1] = fRec0[0];
 			fVec6[1] = fVec6[0];
-			fRec165[1] = fRec165[0];
+			fRec164[1] = fRec164[0];
 		}
 		fSoundfile0 = fSoundfile0ca;
 	}
@@ -111240,52 +111238,52 @@ struct mydsp : public base_dsp {
 	#define FAUST_ACTIVES 23
 	#define FAUST_PASSIVES 0
 
-	FAUST_ADDHORIZONTALSLIDER("A/clockVoices", fHslider6, 4.0f, 1.0f, 5e+01f, 1.0f);
-	FAUST_ADDHORIZONTALSLIDER("A/dispersal", fHslider5, 1.0f, 1.0f, 5e+01f, 1.0f);
-	FAUST_ADDHORIZONTALSLIDER("A/grainDensity", fHslider7, 8.0f, 0.1f, 8e+02f, 0.01f);
-	FAUST_ADDHORIZONTALSLIDER("A/grainDensityMultiplier", fHslider8, 1.0f, 0.1f, 1.0f, 0.01f);
-	FAUST_ADDHORIZONTALSLIDER("A/grainLength", fHslider13, 4096.0f, 1.0f, 1.2e+05f, 1.0f);
-	FAUST_ADDHORIZONTALSLIDER("A/grainLengthMultiplier", fHslider14, 1.0f, 0.1f, 1e+01f, 0.01f);
-	FAUST_ADDHORIZONTALSLIDER("A/grainSpeed", fHslider9, 1.0f, 0.03f, 5e+01f, 0.001f);
-	FAUST_ADDHORIZONTALSLIDER("A/grainSpeedMultiplier", fHslider10, 1.0f, 0.1f, 1e+01f, 0.01f);
-	FAUST_ADDHORIZONTALSLIDER("A/start", fHslider16, 0.05f, 0.0f, 1.0f, 0.001f);
-	FAUST_ADDHORIZONTALSLIDER("A/startInterpBlend", fHslider15, 0.0f, 0.0f, 1.0f, 0.001f);
-	FAUST_ADDHORIZONTALSLIDER("A/startModAmp", fHslider17, 0.0f, 0.0f, 0.5f, 0.001f);
-	FAUST_ADDHORIZONTALSLIDER("A/startModAmpMultiplier", fHslider18, 1.0f, 0.1f, 1e+01f, 0.01f);
-	FAUST_ADDHORIZONTALSLIDER("A/startModFreq", fHslider19, 0.1f, 0.001f, 12.0f, 0.001f);
-	FAUST_ADDHORIZONTALSLIDER("A/startModFreqMultiplier", fHslider20, 1.0f, 0.1f, 1e+01f, 0.01f);
-	FAUST_ADDHORIZONTALSLIDER("B/baseKey", fHslider11, 69.0f, 2e+01f, 1.3e+02f, 0.1f);
-	FAUST_ADDHORIZONTALSLIDER("B/freq", fHslider12, 4.4e+02f, 16.0f, 2e+04f, 0.01f);
-	FAUST_ADDHORIZONTALSLIDER("C/attack", fHslider2, 0.01f, 0.002f, 2.0f, 0.001f);
-	FAUST_ADDHORIZONTALSLIDER("C/decay", fHslider3, 0.06f, 0.002f, 2.0f, 0.001f);
-	FAUST_ADDHORIZONTALSLIDER("C/masterGain", fHslider0, 0.5f, 0.0f, 2.0f, 0.01f);
-	FAUST_ADDHORIZONTALSLIDER("C/release", fHslider1, 0.35f, 0.02f, 12.0f, 0.01f);
-	FAUST_ADDHORIZONTALSLIDER("C/sustain", fHslider4, 0.85f, 0.0f, 1.0f, 0.01f);
+	FAUST_ADDHORIZONTALSLIDER("Granular/A/clockVoices", fHslider9, 4.0f, 1.0f, 5e+01f, 1.0f);
+	FAUST_ADDHORIZONTALSLIDER("Granular/A/dispersal", fHslider20, 1.0f, 1.0f, 5e+01f, 1.0f);
+	FAUST_ADDHORIZONTALSLIDER("Granular/A/grainDensity", fHslider10, 8.0f, 0.5f, 1e+01f, 0.01f);
+	FAUST_ADDHORIZONTALSLIDER("Granular/A/grainDensityMultiplier", fHslider11, 1.0f, 0.5f, 1.0f, 0.01f);
+	FAUST_ADDHORIZONTALSLIDER("Granular/A/grainLength", fHslider12, 4096.0f, 1.0f, 1.2e+05f, 1.0f);
+	FAUST_ADDHORIZONTALSLIDER("Granular/A/grainLengthMultiplier", fHslider13, 1.0f, 0.1f, 1e+01f, 0.01f);
+	FAUST_ADDHORIZONTALSLIDER("Granular/A/grainSpeed", fHslider5, 1.0f, 0.03f, 5e+01f, 0.001f);
+	FAUST_ADDHORIZONTALSLIDER("Granular/A/grainSpeedMultiplier", fHslider6, 1.0f, 0.1f, 1e+01f, 0.01f);
+	FAUST_ADDHORIZONTALSLIDER("Granular/A/start", fHslider15, 0.05f, 0.0f, 1.0f, 0.001f);
+	FAUST_ADDHORIZONTALSLIDER("Granular/A/startInterpBlend", fHslider14, 0.0f, 0.0f, 1.0f, 0.001f);
+	FAUST_ADDHORIZONTALSLIDER("Granular/A/startModAmp", fHslider16, 0.0f, 0.0f, 0.5f, 0.001f);
+	FAUST_ADDHORIZONTALSLIDER("Granular/A/startModAmpMultiplier", fHslider17, 1.0f, 0.1f, 1e+01f, 0.01f);
+	FAUST_ADDHORIZONTALSLIDER("Granular/A/startModFreq", fHslider18, 0.1f, 0.001f, 12.0f, 0.001f);
+	FAUST_ADDHORIZONTALSLIDER("Granular/A/startModFreqMultiplier", fHslider19, 1.0f, 0.1f, 1e+01f, 0.01f);
+	FAUST_ADDHORIZONTALSLIDER("Granular/B/baseKey", fHslider7, 69.0f, 2e+01f, 1.3e+02f, 0.1f);
+	FAUST_ADDHORIZONTALSLIDER("Granular/B/freq", fHslider8, 4.4e+02f, 16.0f, 2e+04f, 0.01f);
+	FAUST_ADDHORIZONTALSLIDER("Granular/C/attack", fHslider2, 0.01f, 0.002f, 2.0f, 0.001f);
+	FAUST_ADDHORIZONTALSLIDER("Granular/C/decay", fHslider3, 0.06f, 0.002f, 2.0f, 0.001f);
+	FAUST_ADDHORIZONTALSLIDER("Granular/C/masterGain", fHslider0, 0.5f, 0.0f, 2.0f, 0.01f);
+	FAUST_ADDHORIZONTALSLIDER("Granular/C/release", fHslider1, 0.35f, 0.02f, 12.0f, 0.01f);
+	FAUST_ADDHORIZONTALSLIDER("Granular/C/sustain", fHslider4, 0.85f, 0.0f, 1.0f, 0.01f);
 	FAUST_ADDBUTTON("gate", fButton0);
 	FAUST_ADDSOUNDFILE("granularSample", fSoundfile0);
 
 	#define FAUST_LIST_ACTIVES(p) \
-		p(HORIZONTALSLIDER, clockVoices, "A/clockVoices", fHslider6, 4.0f, 1.0f, 5e+01f, 1.0f) \
-		p(HORIZONTALSLIDER, dispersal, "A/dispersal", fHslider5, 1.0f, 1.0f, 5e+01f, 1.0f) \
-		p(HORIZONTALSLIDER, grainDensity, "A/grainDensity", fHslider7, 8.0f, 0.1f, 8e+02f, 0.01f) \
-		p(HORIZONTALSLIDER, grainDensityMultiplier, "A/grainDensityMultiplier", fHslider8, 1.0f, 0.1f, 1.0f, 0.01f) \
-		p(HORIZONTALSLIDER, grainLength, "A/grainLength", fHslider13, 4096.0f, 1.0f, 1.2e+05f, 1.0f) \
-		p(HORIZONTALSLIDER, grainLengthMultiplier, "A/grainLengthMultiplier", fHslider14, 1.0f, 0.1f, 1e+01f, 0.01f) \
-		p(HORIZONTALSLIDER, grainSpeed, "A/grainSpeed", fHslider9, 1.0f, 0.03f, 5e+01f, 0.001f) \
-		p(HORIZONTALSLIDER, grainSpeedMultiplier, "A/grainSpeedMultiplier", fHslider10, 1.0f, 0.1f, 1e+01f, 0.01f) \
-		p(HORIZONTALSLIDER, start, "A/start", fHslider16, 0.05f, 0.0f, 1.0f, 0.001f) \
-		p(HORIZONTALSLIDER, startInterpBlend, "A/startInterpBlend", fHslider15, 0.0f, 0.0f, 1.0f, 0.001f) \
-		p(HORIZONTALSLIDER, startModAmp, "A/startModAmp", fHslider17, 0.0f, 0.0f, 0.5f, 0.001f) \
-		p(HORIZONTALSLIDER, startModAmpMultiplier, "A/startModAmpMultiplier", fHslider18, 1.0f, 0.1f, 1e+01f, 0.01f) \
-		p(HORIZONTALSLIDER, startModFreq, "A/startModFreq", fHslider19, 0.1f, 0.001f, 12.0f, 0.001f) \
-		p(HORIZONTALSLIDER, startModFreqMultiplier, "A/startModFreqMultiplier", fHslider20, 1.0f, 0.1f, 1e+01f, 0.01f) \
-		p(HORIZONTALSLIDER, baseKey, "B/baseKey", fHslider11, 69.0f, 2e+01f, 1.3e+02f, 0.1f) \
-		p(HORIZONTALSLIDER, freq, "B/freq", fHslider12, 4.4e+02f, 16.0f, 2e+04f, 0.01f) \
-		p(HORIZONTALSLIDER, attack, "C/attack", fHslider2, 0.01f, 0.002f, 2.0f, 0.001f) \
-		p(HORIZONTALSLIDER, decay, "C/decay", fHslider3, 0.06f, 0.002f, 2.0f, 0.001f) \
-		p(HORIZONTALSLIDER, masterGain, "C/masterGain", fHslider0, 0.5f, 0.0f, 2.0f, 0.01f) \
-		p(HORIZONTALSLIDER, release, "C/release", fHslider1, 0.35f, 0.02f, 12.0f, 0.01f) \
-		p(HORIZONTALSLIDER, sustain, "C/sustain", fHslider4, 0.85f, 0.0f, 1.0f, 0.01f) \
+		p(HORIZONTALSLIDER, clockVoices, "Granular/A/clockVoices", fHslider9, 4.0f, 1.0f, 5e+01f, 1.0f) \
+		p(HORIZONTALSLIDER, dispersal, "Granular/A/dispersal", fHslider20, 1.0f, 1.0f, 5e+01f, 1.0f) \
+		p(HORIZONTALSLIDER, grainDensity, "Granular/A/grainDensity", fHslider10, 8.0f, 0.5f, 1e+01f, 0.01f) \
+		p(HORIZONTALSLIDER, grainDensityMultiplier, "Granular/A/grainDensityMultiplier", fHslider11, 1.0f, 0.5f, 1.0f, 0.01f) \
+		p(HORIZONTALSLIDER, grainLength, "Granular/A/grainLength", fHslider12, 4096.0f, 1.0f, 1.2e+05f, 1.0f) \
+		p(HORIZONTALSLIDER, grainLengthMultiplier, "Granular/A/grainLengthMultiplier", fHslider13, 1.0f, 0.1f, 1e+01f, 0.01f) \
+		p(HORIZONTALSLIDER, grainSpeed, "Granular/A/grainSpeed", fHslider5, 1.0f, 0.03f, 5e+01f, 0.001f) \
+		p(HORIZONTALSLIDER, grainSpeedMultiplier, "Granular/A/grainSpeedMultiplier", fHslider6, 1.0f, 0.1f, 1e+01f, 0.01f) \
+		p(HORIZONTALSLIDER, start, "Granular/A/start", fHslider15, 0.05f, 0.0f, 1.0f, 0.001f) \
+		p(HORIZONTALSLIDER, startInterpBlend, "Granular/A/startInterpBlend", fHslider14, 0.0f, 0.0f, 1.0f, 0.001f) \
+		p(HORIZONTALSLIDER, startModAmp, "Granular/A/startModAmp", fHslider16, 0.0f, 0.0f, 0.5f, 0.001f) \
+		p(HORIZONTALSLIDER, startModAmpMultiplier, "Granular/A/startModAmpMultiplier", fHslider17, 1.0f, 0.1f, 1e+01f, 0.01f) \
+		p(HORIZONTALSLIDER, startModFreq, "Granular/A/startModFreq", fHslider18, 0.1f, 0.001f, 12.0f, 0.001f) \
+		p(HORIZONTALSLIDER, startModFreqMultiplier, "Granular/A/startModFreqMultiplier", fHslider19, 1.0f, 0.1f, 1e+01f, 0.01f) \
+		p(HORIZONTALSLIDER, baseKey, "Granular/B/baseKey", fHslider7, 69.0f, 2e+01f, 1.3e+02f, 0.1f) \
+		p(HORIZONTALSLIDER, freq, "Granular/B/freq", fHslider8, 4.4e+02f, 16.0f, 2e+04f, 0.01f) \
+		p(HORIZONTALSLIDER, attack, "Granular/C/attack", fHslider2, 0.01f, 0.002f, 2.0f, 0.001f) \
+		p(HORIZONTALSLIDER, decay, "Granular/C/decay", fHslider3, 0.06f, 0.002f, 2.0f, 0.001f) \
+		p(HORIZONTALSLIDER, masterGain, "Granular/C/masterGain", fHslider0, 0.5f, 0.0f, 2.0f, 0.01f) \
+		p(HORIZONTALSLIDER, release, "Granular/C/release", fHslider1, 0.35f, 0.02f, 12.0f, 0.01f) \
+		p(HORIZONTALSLIDER, sustain, "Granular/C/sustain", fHslider4, 0.85f, 0.0f, 1.0f, 0.01f) \
 		p(BUTTON, gate, "gate", fButton0, 0.0f, 0.0f, 1.0f, 1.0f) \
 
 	#define FAUST_LIST_PASSIVES(p) \
@@ -111607,7 +111605,8 @@ private:
 class FaustPlugInAudioProcessorEditor : public juce::AudioProcessorEditor
 #if defined(SOUNDFILE)
     ,
-                                        public juce::FileDragAndDropTarget
+                                        public juce::FileDragAndDropTarget,
+                                        public juce::Timer
 #endif
 {
 
@@ -111624,6 +111623,7 @@ public:
     void fileDragExit(const juce::StringArray &files) override;
     void filesDropped(const juce::StringArray &files, int x, int y) override;
     void refreshWaveformAfterExternalSampleChange();
+    void timerCallback() override;
 #endif
 
 private:
@@ -111643,6 +111643,10 @@ private:
     void loadAdjacentBrowseFile(int delta);
     void loadRandomBrowseFile();
     void updateBrowseNavButtonState();
+    void normalizeLoadedSample();
+    float getGrainStartMarkerPosition() const;
+    void setGrainStartPosition(float normalizedPos);
+    juce::String waveformCaptionForLoadedFile() const;
 
     SampleWaveformStrip fWaveform;
     juce::TextEditor fBrowseFolderPath;
@@ -111650,6 +111654,7 @@ private:
     juce::TextButton fPrevAudioFile;
     juce::TextButton fNextAudioFile;
     juce::TextButton fRandomAudioFile;
+    juce::TextButton fNormalizeSample;
     juce::TextButton fLoadSample;
     std::shared_ptr<juce::FileChooser> fFileChooser;
     bool fFileDragHover = false;
@@ -111657,6 +111662,8 @@ private:
     juce::File fBrowseFolderRoot;
     std::vector<juce::File> fBrowseAudioFiles;
     int fBrowseFileIndex = -1;
+    FAUSTFLOAT *fStartZone = nullptr;
+    juce::RangedAudioParameter *fStartParam = nullptr;
 #endif
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(FaustPlugInAudioProcessorEditor)
@@ -112208,12 +112215,35 @@ FaustPlugInAudioProcessorEditor::FaustPlugInAudioProcessorEditor(FaustPlugInAudi
     addAndMakeVisible(fJuceGUI);
 
 #if defined(SOUNDFILE)
+    {
+        StartZoneFinder startFinder;
+#ifdef JUCE_POLY
+        p.fSynth->buildUserInterface(&startFinder);
+#else
+        p.fDSP->buildUserInterface(&startFinder);
+#endif
+        fStartZone = startFinder.fStartZone;
+    }
+
+    for (auto *param : processor.getParameters())
+    {
+        auto *ranged = dynamic_cast<juce::RangedAudioParameter *>(param);
+        if (ranged != nullptr && ranged->getParameterID().endsWith("/start"))
+        {
+            fStartParam = ranged;
+            break;
+        }
+    }
+
+    fWaveform.onPositionChanged = [this](float pos) { setGrainStartPosition(pos); };
+
     addAndMakeVisible(fWaveform);
     addAndMakeVisible(fBrowseFolderPath);
     addAndMakeVisible(fBrowseFolderApply);
     addAndMakeVisible(fPrevAudioFile);
     addAndMakeVisible(fNextAudioFile);
     addAndMakeVisible(fRandomAudioFile);
+    addAndMakeVisible(fNormalizeSample);
     addAndMakeVisible(fLoadSample);
 
     fBrowseFolderPath.setMultiLine(false);
@@ -112230,6 +112260,9 @@ FaustPlugInAudioProcessorEditor::FaustPlugInAudioProcessorEditor(FaustPlugInAudi
     fNextAudioFile.onClick = [this] { loadAdjacentBrowseFile(1); };
     fRandomAudioFile.setButtonText("Random");
     fRandomAudioFile.onClick = [this] { loadRandomBrowseFile(); };
+
+    fNormalizeSample.setButtonText("Normalize");
+    fNormalizeSample.onClick = [this] { normalizeLoadedSample(); };
 
     fLoadSample.setButtonText("Load…");
     if (auto *su = p.getSoundUIBrowse())
@@ -112290,7 +112323,9 @@ FaustPlugInAudioProcessorEditor::FaustPlugInAudioProcessorEditor(FaustPlugInAudi
                                     {
         if (safeThis != nullptr) {
             safeThis->refreshWaveformDisplay();
+            safeThis->fWaveform.setStartMarker(safeThis->getGrainStartMarkerPosition());
         } });
+    startTimerHz(30);
 #endif
 
     const juce::Rectangle<int> recommendedSize = fJuceGUI.getSize();
@@ -112300,6 +112335,7 @@ FaustPlugInAudioProcessorEditor::FaustPlugInAudioProcessorEditor(FaustPlugInAudi
 FaustPlugInAudioProcessorEditor::~FaustPlugInAudioProcessorEditor()
 {
 #if defined(SOUNDFILE)
+    stopTimer();
     if (auto *su = processor.getSoundUIBrowse())
     {
         su->setOnSampleChanged({});
@@ -112339,6 +112375,7 @@ void FaustPlugInAudioProcessorEditor::resized()
     fPrevAudioFile.setBounds(row2.removeFromLeft(navBtnW).reduced(2, 4));
     fNextAudioFile.setBounds(row2.removeFromLeft(navBtnW).reduced(2, 4));
     fRandomAudioFile.setBounds(row2.removeFromLeft(88).reduced(2, 4));
+    fNormalizeSample.setBounds(row2.removeFromLeft(96).reduced(2, 4));
     const int loadW = 96;
     fLoadSample.setBounds(row2.removeFromRight(loadW).reduced(2, 4));
     fWaveform.setBounds(row2.reduced(6, 0));
@@ -112457,17 +112494,79 @@ void FaustPlugInAudioProcessorEditor::updateBrowseNavButtonState()
     fPrevAudioFile.setEnabled(ok);
     fNextAudioFile.setEnabled(ok);
     fRandomAudioFile.setEnabled(ok);
+    const bool hasSample = processor.getSoundUIBrowse()
+                           && processor.getSoundUIBrowse()->getLastLoadedFile().existsAsFile();
+    fNormalizeSample.setEnabled(hasSample);
 }
 
 void FaustPlugInAudioProcessorEditor::refreshWaveformDisplay()
 {
     if (auto *su = processor.getSoundUIBrowse())
     {
-        fWaveform.rebuildFromFile(su->getLastLoadedFile(), su->getSampleDisplayName());
+        fWaveform.rebuildFromFile(su->getLastLoadedFile(), waveformCaptionForLoadedFile());
+        fWaveform.setStartMarker(getGrainStartMarkerPosition());
     }
     else
     {
         fWaveform.clear();
+    }
+}
+
+void FaustPlugInAudioProcessorEditor::timerCallback()
+{
+    fWaveform.setStartMarker(getGrainStartMarkerPosition());
+}
+
+float FaustPlugInAudioProcessorEditor::getGrainStartMarkerPosition() const
+{
+    if (fStartZone != nullptr)
+        return juce::jlimit(0.f, 1.f, (float)*fStartZone);
+    return 0.05f;
+}
+
+void FaustPlugInAudioProcessorEditor::setGrainStartPosition(float normalizedPos)
+{
+    const float pos = juce::jlimit(0.f, 1.f, normalizedPos);
+    // Drive the host parameter so the on-screen Faust slider, the DSP zone (audio) and host
+    // automation all stay in sync; the marker then tracks the updated zone.
+    if (fStartParam != nullptr)
+    {
+        fStartParam->setValueNotifyingHost(fStartParam->convertTo0to1(pos));
+    }
+    else if (fStartZone != nullptr)
+    {
+        *fStartZone = (FAUSTFLOAT)pos;
+    }
+    fWaveform.setStartMarker(getGrainStartMarkerPosition());
+}
+
+juce::String FaustPlugInAudioProcessorEditor::waveformCaptionForLoadedFile() const
+{
+    if (auto *su = processor.getSoundUIBrowse())
+    {
+        const juce::File file = su->getLastLoadedFile();
+        juce::String caption = su->getSampleDisplayName();
+        if (file.getFileName().containsIgnoreCase("_normalized"))
+            caption += " (normalized)";
+        return caption;
+    }
+    return {};
+}
+
+void FaustPlugInAudioProcessorEditor::normalizeLoadedSample()
+{
+    if (auto *su = processor.getSoundUIBrowse())
+    {
+        const juce::File source = su->getLastLoadedFile();
+        if (!source.existsAsFile())
+            return;
+
+        const juce::File normalized =
+            granularPolySynthSoundFileDetail::normalizeAudioToCache(source);
+        if (!normalized.existsAsFile())
+            return;
+
+        loadSampleFromFile(normalized, false);
     }
 }
 

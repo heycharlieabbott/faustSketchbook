@@ -50,7 +50,25 @@
 #include "faust/gui/DecoratorUI.h"
 
 #if defined(SOUNDFILE)
+#include "faust/gui/MapUI.h"
 #include "faust/gui/SoundUI.h"
+
+/** Captures the Faust zone pointer for the start slider (JuceGUI writes zones, not host params). */
+class StartZoneFinder : public MapUI
+{
+public:
+    FAUSTFLOAT *fStartZone = nullptr;
+
+    void addHorizontalSlider(const char *label, FAUSTFLOAT *zone, FAUSTFLOAT init,
+                             FAUSTFLOAT min, FAUSTFLOAT max, FAUSTFLOAT step) override
+    {
+        // Grouped poly prefixes paths with "Polyphonic/Voices/", so match the "/start" suffix
+        // (won't collide with startInterpBlend / startMod* which don't end in "/start").
+        if (fStartZone == nullptr && MapUI::endsWith(buildPath(label), "/start"))
+            fStartZone = zone;
+        MapUI::addHorizontalSlider(label, zone, init, min, max, step);
+    }
+};
 
 namespace granularPolySynthSoundFileDetail
 {
@@ -84,6 +102,57 @@ inline juce::File resolveFileForGranularSampler(const juce::File &source, const 
     if (!source.copyFileTo(dest))
         return source;
 
+    return dest;
+}
+
+/** Peak-normalize audio to [-0.99, 0.99] and write a cached WAV for playback + waveform display. */
+inline juce::File normalizeAudioToCache(const juce::File &source)
+{
+    if (!source.existsAsFile())
+        return {};
+
+    juce::AudioFormatManager formatManager;
+    formatManager.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(source));
+    if (!reader || reader->lengthInSamples <= 0)
+        return {};
+
+    const int numSamples = (int)reader->lengthInSamples;
+    const int numChannels = (int)reader->numChannels;
+    juce::AudioBuffer<float> buffer(numChannels, numSamples);
+    reader->read(&buffer, 0, numSamples, 0, true, true);
+
+    float peak = 0.f;
+    for (int ch = 0; ch < numChannels; ++ch)
+        peak = juce::jmax(peak, buffer.getMagnitude(ch, 0, numSamples));
+
+    if (peak <= 1e-9f)
+        return source;
+
+    buffer.applyGain(0.99f / peak);
+
+    auto dir = getSampleCacheDirectory();
+    if (!dir.createDirectory())
+        return {};
+
+    const auto hash = juce::String::toHexString(juce::String(source.getFullPathName()).hashCode());
+    auto dest = dir.getChildFile(hash + "_normalized.wav");
+    if (dest.existsAsFile())
+        dest.deleteFile();
+
+    juce::WavAudioFormat wavFormat;
+    std::unique_ptr<juce::FileOutputStream> stream(dest.createOutputStream());
+    if (!stream)
+        return {};
+
+    std::unique_ptr<juce::AudioFormatWriter> writer(
+        wavFormat.createWriterFor(stream.get(), reader->sampleRate, (unsigned int)numChannels, 24, {}, 0));
+    if (!writer)
+        return {};
+
+    stream.release();
+    writer->writeFromAudioSampleBuffer(buffer, 0, numSamples);
+    writer->flush();
     return dest;
 }
 } // namespace granularPolySynthSoundFileDetail
@@ -175,8 +244,22 @@ public:
     {
         fPeaks.clear();
         fCaption.clear();
+        fHasStartMarker = false;
         repaint();
     }
+
+    void setStartMarker(float normalizedPos)
+    {
+        fStartMarker = juce::jlimit(0.f, 1.f, normalizedPos);
+        fHasStartMarker = true;
+        repaint();
+    }
+
+    // Invoked while clicking/dragging on the waveform with a normalized [0,1] position.
+    std::function<void(float)> onPositionChanged;
+
+    void mouseDown(const juce::MouseEvent &e) override { handlePositionFromMouse(e); }
+    void mouseDrag(const juce::MouseEvent &e) override { handlePositionFromMouse(e); }
 
     void rebuildFromFile(const juce::File &file, juce::String caption)
     {
@@ -256,6 +339,18 @@ public:
             g.drawLine((float)x, y1, (float)x, y2, 1.2f);
         }
 
+        if (fHasStartMarker)
+        {
+            const float x = fStartMarker * (float)denom;
+            const float top = 3.f;
+            const float bottom = (float)h - 19.f;
+            g.setColour(juce::Colour(0xffff8844));
+            g.drawLine(x, top, x, bottom, 2.f);
+            juce::Path markerHead;
+            markerHead.addTriangle(x - 4.f, top, x + 4.f, top, x, top + 7.f);
+            g.fillPath(markerHead);
+        }
+
         g.setColour(juce::Colours::white.withAlpha(0.7f));
         g.setFont((float)juce::jmin(12, juce::jmax(9, h / 6)));
         g.drawText(fCaption, getLocalBounds().removeFromBottom(16).reduced(8, 0),
@@ -263,8 +358,19 @@ public:
     }
 
 private:
+    void handlePositionFromMouse(const juce::MouseEvent &e)
+    {
+        const int denom = juce::jmax(1, getWidth() - 1);
+        const float pos = juce::jlimit(0.f, 1.f, (float)e.x / (float)denom);
+        setStartMarker(pos);
+        if (onPositionChanged)
+            onPositionChanged(pos);
+    }
+
     std::vector<std::pair<float, float>> fPeaks;
     juce::String fCaption;
+    bool fHasStartMarker = false;
+    float fStartMarker = 0.f;
 };
 #endif
 
@@ -615,7 +721,8 @@ private:
 class FaustPlugInAudioProcessorEditor : public juce::AudioProcessorEditor
 #if defined(SOUNDFILE)
     ,
-                                        public juce::FileDragAndDropTarget
+                                        public juce::FileDragAndDropTarget,
+                                        public juce::Timer
 #endif
 {
 
@@ -632,6 +739,7 @@ public:
     void fileDragExit(const juce::StringArray &files) override;
     void filesDropped(const juce::StringArray &files, int x, int y) override;
     void refreshWaveformAfterExternalSampleChange();
+    void timerCallback() override;
 #endif
 
 private:
@@ -651,6 +759,10 @@ private:
     void loadAdjacentBrowseFile(int delta);
     void loadRandomBrowseFile();
     void updateBrowseNavButtonState();
+    void normalizeLoadedSample();
+    float getGrainStartMarkerPosition() const;
+    void setGrainStartPosition(float normalizedPos);
+    juce::String waveformCaptionForLoadedFile() const;
 
     SampleWaveformStrip fWaveform;
     juce::TextEditor fBrowseFolderPath;
@@ -658,6 +770,7 @@ private:
     juce::TextButton fPrevAudioFile;
     juce::TextButton fNextAudioFile;
     juce::TextButton fRandomAudioFile;
+    juce::TextButton fNormalizeSample;
     juce::TextButton fLoadSample;
     std::shared_ptr<juce::FileChooser> fFileChooser;
     bool fFileDragHover = false;
@@ -665,6 +778,8 @@ private:
     juce::File fBrowseFolderRoot;
     std::vector<juce::File> fBrowseAudioFiles;
     int fBrowseFileIndex = -1;
+    FAUSTFLOAT *fStartZone = nullptr;
+    juce::RangedAudioParameter *fStartParam = nullptr;
 #endif
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(FaustPlugInAudioProcessorEditor)
@@ -1216,12 +1331,35 @@ FaustPlugInAudioProcessorEditor::FaustPlugInAudioProcessorEditor(FaustPlugInAudi
     addAndMakeVisible(fJuceGUI);
 
 #if defined(SOUNDFILE)
+    {
+        StartZoneFinder startFinder;
+#ifdef JUCE_POLY
+        p.fSynth->buildUserInterface(&startFinder);
+#else
+        p.fDSP->buildUserInterface(&startFinder);
+#endif
+        fStartZone = startFinder.fStartZone;
+    }
+
+    for (auto *param : processor.getParameters())
+    {
+        auto *ranged = dynamic_cast<juce::RangedAudioParameter *>(param);
+        if (ranged != nullptr && ranged->getParameterID().endsWith("/start"))
+        {
+            fStartParam = ranged;
+            break;
+        }
+    }
+
+    fWaveform.onPositionChanged = [this](float pos) { setGrainStartPosition(pos); };
+
     addAndMakeVisible(fWaveform);
     addAndMakeVisible(fBrowseFolderPath);
     addAndMakeVisible(fBrowseFolderApply);
     addAndMakeVisible(fPrevAudioFile);
     addAndMakeVisible(fNextAudioFile);
     addAndMakeVisible(fRandomAudioFile);
+    addAndMakeVisible(fNormalizeSample);
     addAndMakeVisible(fLoadSample);
 
     fBrowseFolderPath.setMultiLine(false);
@@ -1238,6 +1376,9 @@ FaustPlugInAudioProcessorEditor::FaustPlugInAudioProcessorEditor(FaustPlugInAudi
     fNextAudioFile.onClick = [this] { loadAdjacentBrowseFile(1); };
     fRandomAudioFile.setButtonText("Random");
     fRandomAudioFile.onClick = [this] { loadRandomBrowseFile(); };
+
+    fNormalizeSample.setButtonText("Normalize");
+    fNormalizeSample.onClick = [this] { normalizeLoadedSample(); };
 
     fLoadSample.setButtonText("Load…");
     if (auto *su = p.getSoundUIBrowse())
@@ -1298,7 +1439,9 @@ FaustPlugInAudioProcessorEditor::FaustPlugInAudioProcessorEditor(FaustPlugInAudi
                                     {
         if (safeThis != nullptr) {
             safeThis->refreshWaveformDisplay();
+            safeThis->fWaveform.setStartMarker(safeThis->getGrainStartMarkerPosition());
         } });
+    startTimerHz(30);
 #endif
 
     const juce::Rectangle<int> recommendedSize = fJuceGUI.getSize();
@@ -1308,6 +1451,7 @@ FaustPlugInAudioProcessorEditor::FaustPlugInAudioProcessorEditor(FaustPlugInAudi
 FaustPlugInAudioProcessorEditor::~FaustPlugInAudioProcessorEditor()
 {
 #if defined(SOUNDFILE)
+    stopTimer();
     if (auto *su = processor.getSoundUIBrowse())
     {
         su->setOnSampleChanged({});
@@ -1347,6 +1491,7 @@ void FaustPlugInAudioProcessorEditor::resized()
     fPrevAudioFile.setBounds(row2.removeFromLeft(navBtnW).reduced(2, 4));
     fNextAudioFile.setBounds(row2.removeFromLeft(navBtnW).reduced(2, 4));
     fRandomAudioFile.setBounds(row2.removeFromLeft(88).reduced(2, 4));
+    fNormalizeSample.setBounds(row2.removeFromLeft(96).reduced(2, 4));
     const int loadW = 96;
     fLoadSample.setBounds(row2.removeFromRight(loadW).reduced(2, 4));
     fWaveform.setBounds(row2.reduced(6, 0));
@@ -1465,17 +1610,79 @@ void FaustPlugInAudioProcessorEditor::updateBrowseNavButtonState()
     fPrevAudioFile.setEnabled(ok);
     fNextAudioFile.setEnabled(ok);
     fRandomAudioFile.setEnabled(ok);
+    const bool hasSample = processor.getSoundUIBrowse()
+                           && processor.getSoundUIBrowse()->getLastLoadedFile().existsAsFile();
+    fNormalizeSample.setEnabled(hasSample);
 }
 
 void FaustPlugInAudioProcessorEditor::refreshWaveformDisplay()
 {
     if (auto *su = processor.getSoundUIBrowse())
     {
-        fWaveform.rebuildFromFile(su->getLastLoadedFile(), su->getSampleDisplayName());
+        fWaveform.rebuildFromFile(su->getLastLoadedFile(), waveformCaptionForLoadedFile());
+        fWaveform.setStartMarker(getGrainStartMarkerPosition());
     }
     else
     {
         fWaveform.clear();
+    }
+}
+
+void FaustPlugInAudioProcessorEditor::timerCallback()
+{
+    fWaveform.setStartMarker(getGrainStartMarkerPosition());
+}
+
+float FaustPlugInAudioProcessorEditor::getGrainStartMarkerPosition() const
+{
+    if (fStartZone != nullptr)
+        return juce::jlimit(0.f, 1.f, (float)*fStartZone);
+    return 0.05f;
+}
+
+void FaustPlugInAudioProcessorEditor::setGrainStartPosition(float normalizedPos)
+{
+    const float pos = juce::jlimit(0.f, 1.f, normalizedPos);
+    // Drive the host parameter so the on-screen Faust slider, the DSP zone (audio) and host
+    // automation all stay in sync; the marker then tracks the updated zone.
+    if (fStartParam != nullptr)
+    {
+        fStartParam->setValueNotifyingHost(fStartParam->convertTo0to1(pos));
+    }
+    else if (fStartZone != nullptr)
+    {
+        *fStartZone = (FAUSTFLOAT)pos;
+    }
+    fWaveform.setStartMarker(getGrainStartMarkerPosition());
+}
+
+juce::String FaustPlugInAudioProcessorEditor::waveformCaptionForLoadedFile() const
+{
+    if (auto *su = processor.getSoundUIBrowse())
+    {
+        const juce::File file = su->getLastLoadedFile();
+        juce::String caption = su->getSampleDisplayName();
+        if (file.getFileName().containsIgnoreCase("_normalized"))
+            caption += " (normalized)";
+        return caption;
+    }
+    return {};
+}
+
+void FaustPlugInAudioProcessorEditor::normalizeLoadedSample()
+{
+    if (auto *su = processor.getSoundUIBrowse())
+    {
+        const juce::File source = su->getLastLoadedFile();
+        if (!source.existsAsFile())
+            return;
+
+        const juce::File normalized =
+            granularPolySynthSoundFileDetail::normalizeAudioToCache(source);
+        if (!normalized.existsAsFile())
+            return;
+
+        loadSampleFromFile(normalized, false);
     }
 }
 
